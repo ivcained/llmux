@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Local state and secrets
+.env
+.env.*
+!.env.example
+*.local
+.state/
+llmux-state.json
+scores.json
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/

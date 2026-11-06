@@ -1,0 +1,9 @@
+name: llmux
+kind: model-provider
+version: "0.1.0"
+manifest_version: 2
+description: "LLMUX aggregates LLM inference marketplaces behind one Hermes provider. Pick a model once, compare live Surplus Intelligence and Antseed offers, and route each request by cheapest, fastest, or balanced policy, with per-model source overrides in the desktop composer."
+author: ivcained
+license: MIT
+requires_hermes: ">=0.22.5"
+tags: [llm, routing, marketplace, cost, latency, surplus, antseed, desktop]
