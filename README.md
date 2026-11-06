@@ -35,6 +35,10 @@ Antseed is optional. LLMUX works with Surplus alone and marks Antseed unavailabl
 
 ## Running the proxy
 
+Loading the plugin starts the proxy automatically: a TCP probe on `127.0.0.1:8378` (or `LLMUX_PORT`) decides whether a child process is spawned, so a gateway restart or a crashed proxy recovers on the next card open. The dashboard backend re-attempts the same spawn-on-demand before every read. Child output goes to `~/.hermes/logs/llmux-proxy.log`, and the child is terminated when the gateway exits. The child inherits the gateway environment, so `SURPLUS_API_KEY` must be visible to the gateway for Surplus inference.
+
+Set `LLMUX_AUTOSTART=0` to keep plugin loading side-effect free and run the proxy yourself:
+
 ```bash
 export SURPLUS_API_KEY="inf_..."
 export LLMUX_POLICY="balanced"          # cheapest | fastest | balanced
@@ -50,7 +54,7 @@ Endpoints:
 - `GET /v1/models` returns the deduplicated union catalog with `sources` on every model.
 - `GET /v1/models/<id>` returns normalized offers, prices, TPS, TTFT, sample counts, and health.
 - `POST /v1/chat/completions` routes one request and passes JSON or SSE through.
-- `GET /llmux/seller-options?model=<id>` returns up to four ranked seller offers with TTFT, TPS, estimated reply time, price and a cache-cost warning.
+- `GET /llmux/seller-options?model=<id>` returns up to four ranked seller offers with TTFT, TPS, estimated reply time, price, discount versus the model's list price, and a cache-cost warning.
 
 Model ids accept routing directives:
 

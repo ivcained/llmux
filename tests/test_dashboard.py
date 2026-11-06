@@ -1,7 +1,10 @@
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
+
+os.environ.setdefault("LLMUX_AUTOSTART", "0")
 
 
 def _load_api():
