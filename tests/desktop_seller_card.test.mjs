@@ -143,6 +143,7 @@ const SIMILAR = {
   samples: 736,
   discount_pct: 63,
   price_ratio: 0.22,
+  price_basis: 'list',
   switch_model: 'qwen3.8-flash',
 }
 
@@ -444,7 +445,7 @@ test('similar models section lists comparable models with speed and price ratio'
   assert.ok(text.includes('Measured routes for this model'), 'seller section labelled')
   assert.ok(text.includes('Similar models in this price range'), 'similar section labelled')
   assert.ok(text.includes('Qwen3.8 Flash'), 'model name shown')
-  assert.ok(text.includes('0.22\u00d7 the current price'), 'price ratio shown')
+  assert.ok(text.includes('0.22\u00d7 the current list price'), 'price ratio names its basis')
   assert.ok(text.includes('via Alibaba DashScope'), 'serving seller named')
   assert.ok(text.includes('73'), 'measured speed shown')
   assert.ok(text.includes('63% off list'), 'discount shown')
@@ -480,6 +481,16 @@ test('switching to a similar model pins the bare model id and says model', async
     value: 'qwen3.8-flash --provider llmux --session',
   })
   await waitFor(() => assert.equal(view.queryByTestId('dialog'), null))
+  unmount()
+})
+
+test('price ratio wording falls back to the routed price when no list basis', async () => {
+  const row = { ...SIMILAR, price_basis: null, price_ratio: 0.8 }
+  const view = await openDialog({ rest: offersPayload([offer()], [row]) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('0.8\u00d7 the current price'), 'routed-price basis named')
+  assert.ok(!text.includes('list price'), 'no list claim without a list basis')
   unmount()
 })
 

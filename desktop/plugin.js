@@ -165,7 +165,7 @@ function modelRow(row) {
     canonical: row.switch_model || row.model,
     note:
       typeof row.price_ratio === 'number'
-        ? `${row.price_ratio}\u00d7 the current price \u00b7 via ${row.seller || row.source}`
+        ? `${row.price_ratio}\u00d7 the current ${row.price_basis === 'list' ? 'list price' : 'price'} \u00b7 via ${row.seller || row.source}`
         : `via ${row.seller || row.source}`,
     cache_warning: row.cache_warning || { text: 'model switch' },
   }

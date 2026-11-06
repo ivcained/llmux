@@ -471,21 +471,26 @@ class SimilarModelsTests(unittest.TestCase):
 
     def setUp(self):
         self.records = [
-            # current model: $0.20/$1.00 blended 0.36, 54 tok/s
+            # current model: list blend 3.6, routed $0.20/$1.00, 54 tok/s
             similar_record("kimi-k3.1-pro", "Kimi K3.1 Pro", 0.2, 1.0, 54, 7487,
                            list_in=2.0, list_out=10.0),
-            # same price range and faster -> suggested first
+            # same tier (list blend 2.48 -> 0.69x) and faster -> suggested first
             similar_record("qwen3.8-flash", "Qwen3.8 Flash", 0.12, 0.5, 73, 4108,
-                           list_in=0.6, list_out=2.0, seller="Alibaba DashScope"),
-            # same price range, moderately faster -> suggested second
+                           list_in=1.6, list_out=6.0, seller="Alibaba DashScope"),
+            # same tier (list blend 3.72 -> 1.03x), moderately faster -> second
             similar_record("glm-5.3-flash", "GLM 5.3 Flash", 0.18, 0.9, 61, 2300,
-                           list_in=0.3, list_out=1.0, seller="Zhipu"),
-            # 20x pricier -> outside the band, never suggested
+                           list_in=2.4, list_out=9.0, seller="Zhipu"),
+            # 4x the tier price -> outside the band
             similar_record("gpt-5.6-luna", "GPT 5.6 Luna", 4.0, 20.0, 90, 900,
                            list_in=8.0, list_out=40.0),
-            # 200x cheaper and "fastest" -> a small model is not a comparable
+            # tiny tier, absurd measured speed -> neither comparable nor credible
             similar_record("tiny-7b", "Tiny 7B", 0.001, 0.004, 900, 200,
                            list_in=0.01, list_out=0.03),
+            # same tier but an implausible 6000 tok/s artifact -> excluded
+            similar_record("artifact-model", "Artifact", 0.2, 1.0, 6000, 300,
+                           list_in=2.0, list_out=10.0),
+            # no published list price -> not comparable against a list-priced model
+            similar_record("no-list-model", "No List", 0.2, 1.0, 80, 500),
             # no speed measurements -> cannot be compared honestly, excluded
             similar_record("mystery-model", "Mystery", 0.2, 1.0, None, None),
         ]
@@ -501,20 +506,44 @@ class SimilarModelsTests(unittest.TestCase):
         self.assertEqual(fastest["seller"], "Alibaba DashScope")
         self.assertEqual(fastest["switch_model"], "qwen3.8-flash")
         self.assertEqual(fastest["input_per_m"], 0.12)
+        self.assertEqual(fastest["price_basis"], "list")
 
     def test_rows_carry_discount_and_price_ratio(self):
         rows = {row["model"]: row for row in self.proxy.similar_models("kimi-k3.1-pro")}
         qwen = rows["qwen3.8-flash"]
-        # list blend 0.8*0.6+0.2*2.0=0.88 vs offer blend 0.196 -> 78% off
-        self.assertEqual(qwen["discount_pct"], 78)
-        # offer blend 0.196 vs current blend 0.36 -> 0.54 of the price
-        self.assertEqual(qwen["price_ratio"], 0.54)
+        # offer blend 0.196 against its own list blend 2.48 -> 92% off
+        self.assertEqual(qwen["discount_pct"], 92)
+        # tier ratio: list blend 2.48 vs current list blend 3.6 -> 0.69
+        self.assertEqual(qwen["price_ratio"], 0.69)
 
     def test_far_cheaper_small_models_are_not_comparable(self):
         models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
         self.assertNotIn("tiny-7b", models)
         self.assertNotIn("gpt-5.6-luna", models)
         self.assertNotIn("mystery-model", models)
+
+    def test_implausible_speed_is_not_a_performance_claim(self):
+        models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
+        self.assertNotIn("artifact-model", models)
+
+    def test_different_price_basis_is_not_compared(self):
+        models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
+        self.assertNotIn("no-list-model", models)
+
+    def test_free_current_route_still_gets_suggestions_via_list_tier(self):
+        records = [
+            similar_record("free-route", "Free Route", 0.0, 0.0, 50, 800,
+                           list_in=2.0, list_out=10.0, seller="Open Forge"),
+            similar_record("qwen3.8-flash", "Qwen3.8 Flash", 0.12, 0.5, 73, 4108,
+                           list_in=1.6, list_out=6.0),
+        ]
+        proxy = ProxyServer(
+            adapters={"surplus": FakeAdapter("surplus", "http://127.0.0.1:1/v1", records)},
+            config=ProxyConfig(policy="balanced"),
+        )
+        rows = proxy.similar_models("free-route")
+        self.assertEqual([row["model"] for row in rows], ["qwen3.8-flash"])
+        self.assertEqual(rows[0]["price_basis"], "list")
 
     def test_current_model_is_never_suggested_against_itself(self):
         self.assertNotIn("kimi-k3.1-pro", [r["model"] for r in self.proxy.similar_models("kimi-k3.1-pro")])

@@ -21,6 +21,17 @@ LOGGER = logging.getLogger("llmux.proxy")
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 MAX_ERROR_BODY = 65536
 STREAM_CHUNK_SIZE = 8192
+# No served LLM sustains generation above this; higher figures come from cached
+# or trivially short completions and must not win a speed ranking.
+MAX_PLAUSIBLE_TPS = 2000.0
+
+
+def plausible_tps(value: float | None) -> float | None:
+    """Measured TPS, or None when the figure is not a credible generation rate."""
+
+    if value is None:
+        return None
+    return value if value <= MAX_PLAUSIBLE_TPS else None
 
 
 class UpstreamError(Exception):
@@ -325,18 +336,18 @@ class ProxyServer:
             return []
         offers = [
             offer for offer in self._routable_offers(record)
-            if offer.healthy and (offer.tps_p50 or offer.ttft_p50_ms)
+            if offer.healthy and (plausible_tps(offer.tps_p50) or offer.ttft_p50_ms)
         ]
         if not offers:
             return []
-        max_tps = max((offer.tps_p50 or 0.0) for offer in offers) or 1.0
+        max_tps = max((plausible_tps(offer.tps_p50) or 0.0) for offer in offers) or 1.0
         min_ttft = min(
             (offer.ttft_p50_ms for offer in offers if offer.ttft_p50_ms is not None),
             default=1.0,
         )
 
         def score(offer) -> float:
-            tps_component = (offer.tps_p50 or 0.0) / max_tps
+            tps_component = (plausible_tps(offer.tps_p50) or 0.0) / max_tps
             ttft_component = (
                 min_ttft / max(offer.ttft_p50_ms, 1.0)
                 if offer.ttft_p50_ms is not None
@@ -359,8 +370,9 @@ class ProxyServer:
                     # A non-zero price is never 100% off; keep the badge honest.
                     discount_pct = 99
             ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
+            row_tps = plausible_tps(offer.tps_p50)
             estimated_reply_seconds = (
-                ttft_s + 1000.0 / offer.tps_p50 if offer.tps_p50 else ttft_s
+                ttft_s + 1000.0 / row_tps if row_tps else ttft_s
             )
             result.append(
                 {
@@ -369,7 +381,7 @@ class ProxyServer:
                     "peer_id": offer.peer_id,
                     "provider_id": offer.provider_id,
                     "upstream_model": offer.upstream_model,
-                    "tps_p50": offer.tps_p50,
+                    "tps_p50": row_tps,
                     "ttft_p50_ms": offer.ttft_p50_ms,
                     "samples": offer.samples,
                     "input_per_m": offer.input_per_m,
@@ -389,18 +401,40 @@ class ProxyServer:
             )
         return result
 
+    @staticmethod
+    def _comparison_price(record: ModelRecord, offer: Any) -> tuple[float, str]:
+        """Price used to judge "same range": list price when published, else the offer.
+
+        List price tracks the capability tier (a flagship's list sits far above a
+        7B's), while a routed offer tracks whatever a discount campaign costs
+        right now. Suggestions must compare tiers, not campaigns, so a published
+        list price wins and the basis is reported alongside the ratio.
+        """
+
+        list_input = record.metadata.get("list_input_per_m")
+        list_output = record.metadata.get("list_output_per_m")
+        if isinstance(list_input, (int, float)) and isinstance(list_output, (int, float)):
+            list_blend = 0.8 * list_input + 0.2 * list_output
+            if list_blend > 0:
+                return list_blend, "list"
+        return blended_price(offer), "market"
+
     def similar_models(
         self, model: str, *, limit: int | None = None, price_band: float | None = None
     ) -> list[dict]:
         """Comparable models for a mid-chat switch, ranked by measured speed.
 
-        "Same price range" is a symmetric band: a suggestion must cost between
-        1/`price_band` and `price_band` times the current route's blended
-        price. The lower bound matters as much as the upper one, otherwise a
-        7B model at 3% of the price outranks a flagship on raw tokens per
-        second and gets presented as "similar". A model without TPS
-        measurements is never proposed as similar-or-better performance, and
-        every price shown is the one the current policy would route to.
+        Three honesty rules shape the list:
+
+        * "Same price range" is a symmetric band on the comparison price, so a
+          model 200x cheaper is not "similar" just because it is fast, and a
+          model 20x pricier is not suggested either.
+        * Candidates are compared on the same basis as the current model (list
+          against list, market against market); mixing a tier price with a
+          campaign price would produce a meaningless ratio.
+        * A model without a credible TPS measurement is never proposed as
+          similar-or-better performance. Figures above `MAX_PLAUSIBLE_TPS` are
+          artifacts of cached or trivially short completions.
         """
 
         limit = self.config.similar_limit if limit is None else limit
@@ -417,8 +451,8 @@ class ProxyServer:
             ).offer
         except NoRouteError:
             return []
-        current_blend = blended_price(current_offer)
-        if current_blend <= 0:
+        current_price, basis = self._comparison_price(current, current_offer)
+        if current_price <= 0:
             return []
 
         rows: list[dict] = []
@@ -433,10 +467,12 @@ class ProxyServer:
                 ).offer
             except NoRouteError:
                 continue
-            if offer.tps_p50 is None:
+            if plausible_tps(offer.tps_p50) is None:
                 continue
-            blend = blended_price(offer)
-            ratio = blend / current_blend
+            candidate_price, candidate_basis = self._comparison_price(record, offer)
+            if candidate_price <= 0 or candidate_basis != basis:
+                continue
+            ratio = candidate_price / current_price
             if ratio > band or ratio < 1.0 / band:
                 continue
             list_input = record.metadata.get("list_input_per_m")
@@ -444,9 +480,10 @@ class ProxyServer:
             discount_pct = None
             if isinstance(list_input, (int, float)) and isinstance(list_output, (int, float)):
                 list_blend = 0.8 * list_input + 0.2 * list_output
+                offer_blend = blended_price(offer)
                 if list_blend > 0:
-                    discount_pct = max(0, min(100, round((1 - blend / list_blend) * 100)))
-                    if discount_pct >= 100 and blend > 0:
+                    discount_pct = max(0, min(100, round((1 - offer_blend / list_blend) * 100)))
+                    if discount_pct >= 100 and offer_blend > 0:
                         discount_pct = 99
             rows.append(
                 {
@@ -463,6 +500,7 @@ class ProxyServer:
                     "samples": offer.samples,
                     "discount_pct": discount_pct,
                     "price_ratio": round(ratio, 2),
+                    "price_basis": candidate_basis,
                     "switch_model": record.id,
                 }
             )
