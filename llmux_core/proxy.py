@@ -60,6 +60,7 @@ class ProxyConfig:
     detail_ttl_seconds: float = 120.0
     similar_price_band: float = 2.0
     similar_limit: int = 3
+    similar_min_samples: int = 10
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
 
@@ -468,6 +469,9 @@ class ProxyServer:
             except NoRouteError:
                 continue
             if plausible_tps(offer.tps_p50) is None:
+                continue
+            if int(offer.samples or 0) < self.config.similar_min_samples:
+                # Too few measurements to claim "similar or better" performance.
                 continue
             candidate_price, candidate_basis = self._comparison_price(record, offer)
             if candidate_price <= 0 or candidate_basis != basis:

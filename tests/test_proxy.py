@@ -489,6 +489,9 @@ class SimilarModelsTests(unittest.TestCase):
             # same tier but an implausible 6000 tok/s artifact -> excluded
             similar_record("artifact-model", "Artifact", 0.2, 1.0, 6000, 300,
                            list_in=2.0, list_out=10.0),
+            # same tier and fast, but only 3 measurements -> not a claim
+            similar_record("thin-samples", "Thin Samples", 0.2, 1.0, 400, 400,
+                           list_in=2.0, list_out=10.0, samples=3),
             # no published list price -> not comparable against a list-priced model
             similar_record("no-list-model", "No List", 0.2, 1.0, 80, 500),
             # no speed measurements -> cannot be compared honestly, excluded
@@ -525,6 +528,10 @@ class SimilarModelsTests(unittest.TestCase):
     def test_implausible_speed_is_not_a_performance_claim(self):
         models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
         self.assertNotIn("artifact-model", models)
+
+    def test_thin_sample_counts_are_not_a_performance_claim(self):
+        models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
+        self.assertNotIn("thin-samples", models)
 
     def test_different_price_basis_is_not_compared(self):
         models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
