@@ -22,7 +22,7 @@ Under active development for the [Hermes Agent Plugin Hackathon](https://hermes-
 
 LLMUX registers as a single Hermes model provider whose base URL points at a local OpenAI-compatible routing proxy. The proxy owns marketplace adapters, policy evaluation, streaming passthrough, cost readback, failover, and the measurement scoreboard. The desktop plugin contributes a source selector and policy selector to the composer through the public Desktop Plugin SDK.
 
-The full concept, decisions, risk review, and build plan live in [`concepts_brief.md`](concepts_brief.md).
+The full concept, decisions, risk review, and build plan live in [`concepts_brief.md`](concepts_brief.md). The first live price and performance comparison, with captured fixtures, is in [`docs/delta-spike-2026-11-06.md`](docs/delta-spike-2026-11-06.md).
 
 ## Requirements
 

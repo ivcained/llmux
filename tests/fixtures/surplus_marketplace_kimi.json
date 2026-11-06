@@ -1,0 +1,27 @@
+{
+  "captured_at": "2026-11-06T05:54:45Z",
+  "source": "GET https://api.surplusintelligence.ai/api/marketplace",
+  "data": {
+    "markets": [
+      {
+        "model": "kimi-k3.1-pro",
+        "best_input_per_1m": 196926,
+        "best_output_per_1m": 984629,
+        "best_cache_read_per_1m": 19693,
+        "direct_input_per_1m": 2000000,
+        "direct_output_per_1m": 10000000,
+        "best_discount_pct": 99.89,
+        "best_live_discount_pct": 90.15,
+        "best_trusted_offer_discount_pct": 71,
+        "healthy_seller_count": 86,
+        "num_sellers": 34,
+        "tps_p50": 54.3,
+        "tps_samples": 1025,
+        "ttft_p50_ms": 7487,
+        "ttft_samples": 21937,
+        "uptime_pct": 77.9,
+        "cache_hit_rate_pct": 92.8
+      }
+    ]
+  }
+}

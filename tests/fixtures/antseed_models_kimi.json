@@ -1,0 +1,60 @@
+{
+  "captured_at": "2026-11-06T05:54:45Z",
+  "source": "GET http://127.0.0.1:8377/v1/models?type=text",
+  "object": "list",
+  "data": [
+    {
+      "id": "kimi-k3-1-pro",
+      "name": "Kimi K3 1 Pro",
+      "object": "model",
+      "owned_by": "antseed",
+      "type": "text",
+      "peers": [
+        {
+          "peerId": "d19ffae0e85b5230422019926b2f37ec0f1f41f3",
+          "displayName": "Super Seeder",
+          "serviceId": "kimi-k3-1-pro",
+          "inputUsdPerMillion": 0.99,
+          "outputUsdPerMillion": 4.95,
+          "cachedInputUsdPerMillion": 0.099,
+          "effectiveReputationScore": 77.11447917010567,
+          "health": {"status": "healthy", "source": "traffic"},
+          "performance": {"requests": 160, "successRate": 1, "firstTokenMsP50": 3460, "tokensPerSecondP50": 93}
+        },
+        {
+          "peerId": "d5e7d5950b6cc71c095da4ace0c0cb8495667be0",
+          "displayName": "attacompute.ai",
+          "serviceId": "kimi-k3-1-pro",
+          "inputUsdPerMillion": 0.12,
+          "outputUsdPerMillion": 0.585,
+          "cachedInputUsdPerMillion": 0.12,
+          "effectiveReputationScore": 53.17519111247276,
+          "health": {"status": "healthy", "source": "traffic"},
+          "performance": {"requests": 30, "successRate": 0.7333, "firstTokenMsP50": 17488, "tokensPerSecondP50": 76}
+        },
+        {
+          "peerId": "db856b5a50a0cc8e91199523d06dbcbea3abdc43",
+          "displayName": "Vector Studios",
+          "serviceId": "kimi-k3-1-pro",
+          "inputUsdPerMillion": 0.0603,
+          "outputUsdPerMillion": 0.494,
+          "cachedInputUsdPerMillion": 0.018,
+          "effectiveReputationScore": 0,
+          "health": {"status": "healthy", "source": "traffic"},
+          "performance": {"requests": 23, "successRate": 1, "firstTokenMsP50": 17488, "tokensPerSecondP50": 76}
+        },
+        {
+          "peerId": "4ae1f7ab76ab94011ac54a3adf010461a51f117b",
+          "displayName": "Hana Gateway",
+          "serviceId": "kimi-k3-1-pro",
+          "inputUsdPerMillion": 0.08,
+          "outputUsdPerMillion": 1,
+          "cachedInputUsdPerMillion": 0.02,
+          "effectiveReputationScore": 0,
+          "health": {"status": "healthy", "source": "traffic"},
+          "performance": {"requests": 1, "successRate": 1, "firstTokenMsP50": 37488, "tokensPerSecondP50": 290}
+        }
+      ]
+    }
+  ]
+}
