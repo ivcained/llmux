@@ -285,11 +285,12 @@ class ProxyServer:
                     "estimated_reply_seconds": round(estimated_reply_seconds, 1),
                     "cache_warning": {
                         "text": (
-                            "Switching sellers re-sends the whole chat. Cached-prefix "
-                            "discounts are lost and input is billed again."
+                            "The next request sends the current conversation context to the "
+                            "selected route. Cache discounts may be lost; the interrupted "
+                            "request may still be charged."
                         ),
-                        "prompt_tokens": 8000,
-                        "uncached_input_cost_usd": offer.input_per_m * 8000 / 1_000_000,
+                        "prompt_tokens": None,
+                        "uncached_input_cost_usd": None,
                     },
                 }
             )
@@ -386,6 +387,10 @@ class ProxyServer:
                             },
                         )
                         return
+                    if path == "/llmux/plan":
+                        model = parse_qs(urlsplit(self.path).query).get("model", [""])[0]
+                        self._json(200, proxy.plan_route({"model": model}))
+                        return
                     if path == "/llmux/seller-options":
                         raw_query = urlsplit(self.path).query
                         model = parse_qs(raw_query).get("model", [""])[0]
@@ -395,6 +400,10 @@ class ProxyServer:
                         )
                         return
                     self._error(404, "not_found", "not found")
+                except NoRouteError as exc:
+                    self._error(404, "model_not_found", str(exc))
+                except ValueError as exc:
+                    self._error(400, "invalid_model", str(exc))
                 except UpstreamError as exc:
                     self._error(502, "catalog_unavailable", str(exc))
 

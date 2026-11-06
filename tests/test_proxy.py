@@ -165,7 +165,7 @@ class ProxyCase(unittest.TestCase):
             },
             config=self.config,
         )
-        self.port = self.proxy.start()
+        self.port = self.proxy.start(port=0)
 
     def tearDown(self):
         self.proxy.stop()
@@ -330,10 +330,18 @@ class SellerOptionsTests(ProxyCase):
         self.assertEqual(options[0]["ttft_p50_ms"], 7487)
         self.assertEqual(options[0]["estimated_reply_seconds"], 26.0)
         self.assertEqual(options[0]["upstream_model"], "kimi-k3.1-pro")
-        self.assertEqual(options[0]["cache_warning"]["prompt_tokens"], 8000)
-        self.assertAlmostEqual(
-            options[0]["cache_warning"]["uncached_input_cost_usd"], 0.0016
-        )
+        self.assertIsNone(options[0]["cache_warning"]["prompt_tokens"])
+        self.assertIsNone(options[0]["cache_warning"]["uncached_input_cost_usd"])
+
+    def test_plan_endpoint_validates_exact_pin_without_inference(self):
+        status, _, body = self.request_json('/llmux/plan?model=kimi-k3.1-pro@antseed@peer:peer-1')
+        self.assertEqual(status, 200)
+        self.assertEqual(body['upstream_model'], 'peer-1@kimi-k3-1-pro')
+        self.assertFalse(body['failover_allowed'])
+        self.assertEqual(self.antseed.requests, [])
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request_json('/llmux/plan?model=kimi-k3.1-pro@antseed@peer:missing')
+        self.assertEqual(caught.exception.code, 404)
 
     def test_options_unknown_model_is_empty(self):
         self.assertEqual(self.proxy.seller_options("missing"), [])
