@@ -20,6 +20,7 @@ def record(source_price_in=0.2, source_price_out=1.0, source_tps=54):
                 upstream_model="kimi-k3.1-pro",
                 input_per_m=source_price_in,
                 output_per_m=source_price_out,
+                cached_input_per_m=0.02,
                 tps_p50=source_tps,
                 ttft_p50_ms=7487,
                 samples=100,
@@ -33,6 +34,7 @@ def record(source_price_in=0.2, source_price_out=1.0, source_tps=54):
                 ttft_p50_ms=17488,
                 samples=30,
                 reputation=77.1,
+                peer_id="peer-1",
             ),
         ),
     )
@@ -144,6 +146,12 @@ class ProxyCase(unittest.TestCase):
         catalog_record = (
             record(0.01, 0.02, 54) if self.surplus_cheap else record()
         )
+        surplus_record = replace(
+            catalog_record,
+            offers=tuple(
+                offer for offer in catalog_record.offers if offer.source == "surplus"
+            ),
+        )
         antseed_record = replace(
             catalog_record,
             offers=tuple(
@@ -152,7 +160,7 @@ class ProxyCase(unittest.TestCase):
         )
         self.proxy = ProxyServer(
             adapters={
-                "surplus": FakeAdapter("surplus", self.surplus.base_url, [catalog_record]),
+                "surplus": FakeAdapter("surplus", self.surplus.base_url, [surplus_record]),
                 "antseed": FakeAdapter("antseed", self.antseed.base_url, [antseed_record]),
             },
             config=self.config,
@@ -225,6 +233,17 @@ class NonStreamingRoutingTests(ProxyCase):
         self.assertEqual(body["model"], "peer-1@kimi-k3-1-pro")
         self.assertEqual(len(self.surplus.requests), 0)
         self.assertEqual(len(self.antseed.requests), 1)
+
+    def test_peer_directive_pins_exact_seller(self):
+        status, headers, body = self.completions(model="kimi-k3.1-pro@antseed@peer:peer-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["model"], "peer-1@kimi-k3-1-pro")
+        self.assertEqual(headers["X-LLMUX-Source"], "antseed")
+
+    def test_peer_directive_rejects_unknown_seller(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.completions(model="kimi-k3.1-pro@antseed@peer:does-not-exist")
+        self.assertEqual(caught.exception.code, 404)
 
     def test_source_suffix_pins_surplus(self):
         status, headers, _ = self.completions(model="kimi-k3.1-pro@surplus")
@@ -301,6 +320,29 @@ class PartialStreamTests(ProxyCase):
         self.assertNotIn("[DONE]", body)
         self.assertIn("hello", body)
         self.assertEqual(len(self.antseed.requests), 0)
+
+
+class SellerOptionsTests(ProxyCase):
+    def test_options_rank_sellers_by_estimated_reply_time(self):
+        options = self.proxy.seller_options("kimi-k3.1-pro", limit=4)
+        self.assertEqual(len(options), 2)
+        self.assertEqual(options[0]["source"], "surplus")
+        self.assertEqual(options[0]["ttft_p50_ms"], 7487)
+        self.assertEqual(options[0]["estimated_reply_seconds"], 26.0)
+        self.assertEqual(options[0]["upstream_model"], "kimi-k3.1-pro")
+        self.assertEqual(options[0]["cache_warning"]["prompt_tokens"], 8000)
+        self.assertAlmostEqual(
+            options[0]["cache_warning"]["uncached_input_cost_usd"], 0.0016
+        )
+
+    def test_options_unknown_model_is_empty(self):
+        self.assertEqual(self.proxy.seller_options("missing"), [])
+
+    def test_seller_options_http_endpoint(self):
+        status, _, body = self.request_json("/llmux/seller-options?model=kimi-k3.1-pro")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["data"]), 2)
+        self.assertEqual(body["data"][0]["source"], "surplus")
 
 
 if __name__ == "__main__":

@@ -34,15 +34,22 @@ def parse_model_directive(value: str) -> ModelDirective:
         raise ValueError("model is required")
     source = None
     policy = None
+    peer_id = None
     for raw in parts[1:]:
-        suffix = raw.strip().lower()
-        if suffix in SOURCE_ALIASES:
-            source = SOURCE_ALIASES[suffix]
-        elif suffix in POLICY_ALIASES:
-            policy = POLICY_ALIASES[suffix]
+        suffix = raw.strip()
+        lowered = suffix.lower()
+        if lowered.startswith("peer:"):
+            peer_id = suffix.split(":", 1)[1].strip()
+            if not peer_id:
+                raise ValueError("peer directive requires an id")
+            continue
+        if lowered in SOURCE_ALIASES:
+            source = SOURCE_ALIASES[lowered]
+        elif lowered in POLICY_ALIASES:
+            policy = POLICY_ALIASES[lowered]
         else:
             raise ValueError(f"unknown LLMUX model directive: @{raw}")
-    return ModelDirective(model=model, source=source, policy=policy)
+    return ModelDirective(model=model, source=source, policy=policy, peer_id=peer_id)
 
 
 def blended_price(offer: Offer) -> float:

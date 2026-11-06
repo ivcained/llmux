@@ -42,6 +42,7 @@ class ModelDirective:
     model: str
     source: str | None = None
     policy: str | None = None
+    peer_id: str | None = None
 
 
 @dataclass(frozen=True)

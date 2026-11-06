@@ -13,6 +13,7 @@ Under active development for the [Hermes Agent Plugin Hackathon](https://hermes-
 - **One model catalog.** The union of the Surplus and Antseed chat-model catalogs, deduplicated, with the same model available from either marketplace.
 - **Policy routing.** `cheapest`, `fastest`, or `balanced`, with a tokens-per-second floor (low, mid, high).
 - **Per-model source choice.** Pin the selected model to Surplus or Antseed, or leave it on Auto and let the policy decide. Example: Kimi 3.1 Pro is cheaper on Surplus today, so choose Surplus for that model once.
+- **Mid-chat seller switching.** A "Switch seller" card lists up to four ranked offers with TTFT, TPS, estimated reply time and price. Confirming the switch pins that seller for the next turn, stops any in-flight turn first, and warns that the whole chat re-sends and the cached-prefix discount is lost. If the gateway refuses the switch, the card offers a clean session on the pinned route instead of leaving a broken runtime.
 - **Live routing receipts.** See which marketplace served the last request, what it cost, and its measured speed.
 - **Balance watchdog.** Track both marketplace balances separately and warn before either runs dry.
 - **Fiat refill.** Open a Peer.xyz onramp to fund the wallet with USDC on Base using CashApp, Venmo, or PayPal rails, then follow the guided deposit step for the marketplace you need. LLMUX never holds keys or funds.
@@ -49,6 +50,7 @@ Endpoints:
 - `GET /v1/models` returns the deduplicated union catalog with `sources` on every model.
 - `GET /v1/models/<id>` returns normalized offers, prices, TPS, TTFT, sample counts, and health.
 - `POST /v1/chat/completions` routes one request and passes JSON or SSE through.
+- `GET /llmux/seller-options?model=<id>` returns up to four ranked seller offers with TTFT, TPS, estimated reply time, price and a cache-cost warning.
 
 Model ids accept routing directives:
 

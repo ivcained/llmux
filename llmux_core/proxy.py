@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .catalog import Catalog
@@ -72,8 +72,10 @@ class ProxyServer:
             errors: dict[str, str] = {}
             for name, adapter in self.adapters.items():
                 try:
-                    groups.append(adapter.fetch_catalog())
-                except Exception as exc:  # one marketplace must not blank the catalog
+                    records = adapter.fetch_catalog()
+                    groups.append(records)
+                    LOGGER.info("catalog %s: %d records", name, len(records))
+                except Exception as exc:
                     LOGGER.warning("catalog fetch failed for %s: %s", name, exc)
                     errors[name] = str(exc)
             self.source_errors = errors
@@ -98,7 +100,25 @@ class ProxyServer:
             tps_floor=self.config.tps_floor,
             balanced_tolerance=self.config.balanced_tolerance,
         )
-        return decision, directive, directive.source is None
+        if directive.peer_id:
+            pinned = [
+                offer
+                for offer in record.offers
+                if offer.peer_id == directive.peer_id
+                and offer.healthy
+                and (directive.source is None or offer.source == directive.source)
+            ]
+            if not pinned:
+                raise NoRouteError(f"seller {directive.peer_id} is not available")
+            decision = RouteDecision(
+                requested_model=record.id,
+                upstream_model=pinned[0].upstream_model,
+                offer=pinned[0],
+                policy=policy,
+                applied_policy=policy,
+                reason="seller pinned by user",
+            )
+        return decision, directive, directive.source is None and directive.peer_id is None
 
     def _alternate(
         self, record: ModelRecord, decision: RouteDecision, policy: str
@@ -217,6 +237,64 @@ class ProxyServer:
             ),
         )
 
+    def seller_options(self, model: str, *, limit: int = 4) -> list[dict]:
+        """Return ranked seller options with timings and an honest cache warning."""
+
+        record = self._get_catalog().get(model)
+        if record is None:
+            return []
+        offers = [
+            offer for offer in record.offers
+            if offer.healthy and (offer.tps_p50 or offer.ttft_p50_ms)
+        ]
+        if not offers:
+            return []
+        max_tps = max((offer.tps_p50 or 0.0) for offer in offers) or 1.0
+        min_ttft = min(
+            (offer.ttft_p50_ms for offer in offers if offer.ttft_p50_ms is not None),
+            default=1.0,
+        )
+
+        def score(offer) -> float:
+            tps_component = (offer.tps_p50 or 0.0) / max_tps
+            ttft_component = (
+                min_ttft / max(offer.ttft_p50_ms, 1.0)
+                if offer.ttft_p50_ms is not None
+                else 0.0
+            )
+            return 0.6 * tps_component + 0.4 * ttft_component
+
+        ranked = sorted(offers, key=score, reverse=True)[:limit]
+        result = []
+        for offer in ranked:
+            ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
+            estimated_reply_seconds = (
+                ttft_s + 1000.0 / offer.tps_p50 if offer.tps_p50 else ttft_s
+            )
+            result.append(
+                {
+                    "source": offer.source,
+                    "seller": offer.seller or offer.source,
+                    "peer_id": offer.peer_id,
+                    "upstream_model": offer.upstream_model,
+                    "tps_p50": offer.tps_p50,
+                    "ttft_p50_ms": offer.ttft_p50_ms,
+                    "samples": offer.samples,
+                    "input_per_m": offer.input_per_m,
+                    "output_per_m": offer.output_per_m,
+                    "estimated_reply_seconds": round(estimated_reply_seconds, 1),
+                    "cache_warning": {
+                        "text": (
+                            "Switching sellers re-sends the whole chat. Cached-prefix "
+                            "discounts are lost and input is billed again."
+                        ),
+                        "prompt_tokens": 8000,
+                        "uncached_input_cost_usd": offer.input_per_m * 8000 / 1_000_000,
+                    },
+                }
+            )
+        return result
+
     def plan_route(self, body: dict) -> dict:
         """Return the routing decision for a request without calling upstream."""
 
@@ -306,6 +384,14 @@ class ProxyServer:
                                     for offer in record.offers
                                 ],
                             },
+                        )
+                        return
+                    if path == "/llmux/seller-options":
+                        raw_query = urlsplit(self.path).query
+                        model = parse_qs(raw_query).get("model", [""])[0]
+                        self._json(
+                            200,
+                            {"object": "list", "data": proxy.seller_options(model)},
                         )
                         return
                     self._error(404, "not_found", "not found")
