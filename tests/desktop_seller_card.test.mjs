@@ -120,12 +120,30 @@ function offer(overrides = {}) {
   return { ...OFFER, ...overrides }
 }
 
-function offersPayload(rows) {
+function offersPayload(rows, similar = []) {
   return async path => {
     if (path.startsWith('/seller-options')) return { data: rows }
+    if (path.startsWith('/similar-models')) return { data: similar }
     if (path === '/validate-route') return { ok: true, plan: { model: 'planned' } }
     throw new Error(`unexpected rest path: ${path}`)
   }
+}
+
+const SIMILAR = {
+  model: 'qwen3.8-flash',
+  name: 'Qwen3.8 Flash',
+  source: 'surplus',
+  seller: 'Alibaba DashScope',
+  provider_id: 'dashscope-cn',
+  peer_id: null,
+  input_per_m: 0.05,
+  output_per_m: 0.2,
+  tps_p50: 73,
+  ttft_p50_ms: 4108,
+  samples: 736,
+  discount_pct: 63,
+  price_ratio: 0.22,
+  switch_model: 'qwen3.8-flash',
 }
 
 function registerCard() {
@@ -419,6 +437,52 @@ test('config.set failure offers an honestly labelled clean-session recovery', as
   unmount()
 })
 
+test('similar models section lists comparable models with speed and price ratio', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()], [SIMILAR]) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('Measured routes for this model'), 'seller section labelled')
+  assert.ok(text.includes('Similar models in this price range'), 'similar section labelled')
+  assert.ok(text.includes('Qwen3.8 Flash'), 'model name shown')
+  assert.ok(text.includes('0.22\u00d7 the current price'), 'price ratio shown')
+  assert.ok(text.includes('via Alibaba DashScope'), 'serving seller named')
+  assert.ok(text.includes('73'), 'measured speed shown')
+  assert.ok(text.includes('63% off list'), 'discount shown')
+  unmount()
+})
+
+test('no similar models means no empty section', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()], []) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  assert.ok(!view.getByTestId('dialog').textContent.includes('Similar models'), 'section omitted')
+  unmount()
+})
+
+test('switching to a similar model pins the bare model id and says model', async () => {
+  const view = await openDialog({ busy: true, rest: offersPayload([offer()], [SIMILAR]) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  await act(async () => {
+    fireEvent.click(view.getAllByText('Switch')[1])
+  })
+  await waitFor(() => assert.ok(view.getByTestId('confirm-dialog')))
+  assert.equal(view.getByTestId('confirm-title').textContent, 'Switch to Qwen3.8 Flash?')
+  assert.equal(view.getByTestId('confirm-accept').textContent, 'Switch model')
+  await confirm(view)
+  await waitFor(() =>
+    assert.ok(shim.notifications.some(n => n.kind === 'success' && n.message.includes('Pinned Qwen3.8 Flash'))),
+  )
+  const validate = shim.seq[seqIndex(e => e.type === 'rest' && e.path === '/validate-route')]
+  assert.deepEqual(validate.options.body, { model: 'qwen3.8-flash' })
+  const setCall = shim.seq[seqIndex(e => e.type === 'rpc' && e.method === 'config.set')]
+  assert.deepEqual(setCall.params, {
+    key: 'model',
+    session_id: 'sess-1',
+    value: 'qwen3.8-flash --provider llmux --session',
+  })
+  await waitFor(() => assert.equal(view.queryByTestId('dialog'), null))
+  unmount()
+})
+
 test('exported helpers: routeTarget, bareModel, uncachedInputCostUsd', () => {
   const { bareModel, routeTarget, uncachedInputCostUsd } = plugin
   assert.equal(bareModel('model@surplus@peer:x'), 'model')
@@ -427,6 +491,11 @@ test('exported helpers: routeTarget, bareModel, uncachedInputCostUsd', () => {
     routeTarget({ source: 'surplus', peer_id: 'p1' }, 'model@old@peer:z'),
     'model@surplus@peer:p1',
     'prior route suffix stripped before re-pinning',
+  )
+  assert.equal(
+    routeTarget({ source: 'surplus', provider_id: 'dashscope-cn' }, 'model@antseed@peer:z'),
+    'model@surplus@provider:dashscope-cn',
+    'surplus provider pin uses the provider directive',
   )
   assert.equal(routeTarget({ source: 'antseed' }, 'model'), 'model@antseed')
   assert.equal(

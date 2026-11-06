@@ -1,18 +1,21 @@
 """Self-healing start for the local LLMUX routing proxy.
 
-The desktop seller card and the dashboard backend both depend on the proxy at
-127.0.0.1:LLMUX_PORT. A gateway restart or a crashed proxy must not leave the
-user with a manual "start python -m llmux_core" instruction: a cheap TCP probe
-decides whether a child process is spawned, and the caller waits briefly for
-the port so the very next request can succeed.
+The desktop seller card, the dashboard backend and every inference request
+depend on the proxy at 127.0.0.1:LLMUX_PORT. A dead proxy must respawn on the
+next use instead of surfacing a manual "start python -m llmux_core"
+instruction.
 
-The spawned child is tracked and terminated at interpreter exit so a plugin
-reload does not leave orphan proxies holding the port.
+The child is detached into its own session so it survives whatever spawned it:
+short-lived spawners (a CLI plugin load, a gateway reload, a test run) must not
+take the proxy down with them, which previously caused restart churn. Lifetime
+is therefore "until the user or the machine stops it", concurrent spawners are
+serialized with a lock file so only one child binds the port, and every later
+caller adopts the running proxy through the TCP probe.
 """
 
 from __future__ import annotations
 
-import atexit
+import contextlib
 import os
 import socket
 import subprocess
@@ -22,7 +25,6 @@ from pathlib import Path
 
 DEFAULT_PORT = 8378
 DISABLED_VALUES = ("0", "false", "no", "off")
-_CHILDREN: list[subprocess.Popen] = []
 
 
 def port_listening(host: str = "127.0.0.1", port: int = DEFAULT_PORT, timeout: float = 0.25) -> bool:
@@ -38,22 +40,55 @@ def autostart_enabled(env: dict | None = None) -> bool:
     return values.get("LLMUX_AUTOSTART", "1").strip().lower() not in DISABLED_VALUES
 
 
+@contextlib.contextmanager
+def _spawn_lock(logs: Path | None, port: int):
+    """Serialize probe-and-spawn across processes.
+
+    Degrades to an unlocked no-op when the lock file cannot be created, so a
+    read-only log directory still allows best-effort spawning.
+    """
+
+    if logs is None:
+        yield
+        return
+    try:
+        handle = open(logs / f"llmux-proxy-{port}.lock", "a+b")
+    except OSError:
+        yield
+        return
+    try:
+        import fcntl
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Another process holds the lock and is spawning: wait for the port
+            # instead of racing a second child that cannot bind.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not port_listening(port=port):
+                time.sleep(0.1)
+        yield
+    finally:
+        handle.close()
+
+
 def ensure_proxy_running(
     plugin_dir: Path | str,
     port: int = DEFAULT_PORT,
     *,
-    wait_seconds: float = 3.0,
+    wait_seconds: float = 5.0,
     python: str | None = None,
     log_dir: Path | str | None = None,
     env: dict | None = None,
 ) -> subprocess.Popen | None:
-    """Spawn the proxy child when nothing serves `port`.
+    """Spawn a detached proxy child when nothing serves `port`.
 
     Returns the Popen handle when a child was started, None when the port was
     already served or autostart is disabled. Never raises for expected failure
     modes: a child that dies immediately is still returned so callers can
     surface their own offline state.
     """
+
     if port_listening(port=port):
         return None
     if not autostart_enabled(env):
@@ -68,22 +103,31 @@ def ensure_proxy_running(
 
     logs = Path(log_dir) if log_dir is not None else Path.home() / ".hermes" / "logs"
     out: object = subprocess.DEVNULL
+    log_handle = None
     try:
         logs.mkdir(parents=True, exist_ok=True)
-        out = open(logs / "llmux-proxy.log", "ab")  # noqa: SIM115 - the child owns this fd
+        log_handle = open(logs / "llmux-proxy.log", "ab")
+        out = log_handle
     except OSError:
+        logs = None
         out = subprocess.DEVNULL
 
-    proc = subprocess.Popen(
-        [python or sys.executable, "-m", "llmux_core", "--port", str(port)],
-        cwd=str(plugin_dir),
-        env=base_env,
-        stdout=out,
-        stderr=subprocess.STDOUT,
-    )
-    if not _CHILDREN:
-        atexit.register(_terminate_children)
-    _CHILDREN.append(proc)
+    try:
+        with _spawn_lock(logs, port):
+            if port_listening(port=port):
+                return None
+            proc = subprocess.Popen(
+                [python or sys.executable, "-m", "llmux_core", "--port", str(port)],
+                cwd=str(plugin_dir),
+                env=base_env,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    finally:
+        # The child inherited the descriptor; the parent must not leak it.
+        if log_handle is not None:
+            log_handle.close()
 
     deadline = time.monotonic() + max(0.0, wait_seconds)
     while time.monotonic() < deadline:
@@ -91,13 +135,3 @@ def ensure_proxy_running(
             break
         time.sleep(0.1)
     return proc
-
-
-def _terminate_children() -> None:
-    for proc in list(_CHILDREN):
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-        except OSError:
-            pass
-    _CHILDREN.clear()

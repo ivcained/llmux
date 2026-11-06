@@ -83,11 +83,10 @@ class EnsureProxyRunningTests(unittest.TestCase):
         argv = args[0]
         self.assertEqual(argv[-4:], ["-m", "llmux_core", "--port", str(port)])
         self.assertEqual(kwargs["cwd"], str(PLUGIN_DIR))
+        self.assertTrue(kwargs["start_new_session"], "child must outlive its spawner")
         python_path = kwargs["env"]["PYTHONPATH"]
         self.assertIn(str(PLUGIN_DIR), python_path)
         self.assertIn("/existing", python_path)
-        self.assertIn(proc, autostart._CHILDREN)
-        autostart._CHILDREN.remove(proc)
 
     def test_child_that_exits_immediately_is_not_waited_on_forever(self):
         proc = mock.Mock()
@@ -103,8 +102,6 @@ class EnsureProxyRunningTests(unittest.TestCase):
                 env={"LLMUX_AUTOSTART": "1"},
             )
         self.assertIs(result, proc)
-        if proc in autostart._CHILDREN:
-            autostart._CHILDREN.remove(proc)
 
 
 if __name__ == "__main__":

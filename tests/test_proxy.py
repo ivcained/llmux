@@ -137,6 +137,56 @@ class FakeAdapter:
         return self._records
 
 
+class FakeDetailAdapter(FakeAdapter):
+    """Surplus adapter double that also serves named per-provider offers."""
+
+    def __init__(self, source, base_url, records, detail=None, detail_error=None):
+        super().__init__(source, base_url, records)
+        self._detail = list(detail or [])
+        self._detail_error = detail_error
+        self.detail_calls = []
+
+    def provider_offers(self, model_id):
+        self.detail_calls.append(model_id)
+        if self._detail_error is not None:
+            raise self._detail_error
+        return list(self._detail)
+
+    @staticmethod
+    def build_extra_body(decision):
+        provider_id = getattr(decision.offer, "provider_id", None)
+        return {"provider_order": [provider_id]} if provider_id else {}
+
+
+def detail_offers():
+    """Two named Surplus providers, shaped like the live join produces."""
+
+    return [
+        Offer(
+            source="surplus",
+            upstream_model="kimi-k3.1-pro",
+            input_per_m=0.3,
+            output_per_m=1.2,
+            tps_p50=73.3,
+            ttft_p50_ms=4108,
+            samples=736,
+            seller="Alibaba DashScope \u2014 China",
+            provider_id="dashscope-cn",
+        ),
+        Offer(
+            source="surplus",
+            upstream_model="kimi-k3.1-pro",
+            input_per_m=0.25,
+            output_per_m=1.1,
+            tps_p50=None,
+            ttft_p50_ms=33570,
+            samples=2,
+            seller="InferHub",
+            provider_id="inferhub",
+        ),
+    ]
+
+
 class ProxyCase(unittest.TestCase):
     surplus_mode = "ok"
     antseed_mode = "ok"
@@ -161,10 +211,12 @@ class ProxyCase(unittest.TestCase):
                 offer for offer in catalog_record.offers if offer.source == "antseed"
             ),
         )
+        self.surplus_records = [surplus_record]
+        self.antseed_records = [antseed_record]
         self.proxy = ProxyServer(
             adapters={
-                "surplus": FakeAdapter("surplus", self.surplus.base_url, [surplus_record]),
-                "antseed": FakeAdapter("antseed", self.antseed.base_url, [antseed_record]),
+                "surplus": FakeAdapter("surplus", self.surplus.base_url, self.surplus_records),
+                "antseed": FakeAdapter("antseed", self.antseed.base_url, self.antseed_records),
             },
             config=self.config,
         )
@@ -388,6 +440,174 @@ class SellerOptionsTests(ProxyCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(body["data"]), 2)
         self.assertEqual(body["data"][0]["source"], "surplus")
+
+
+def similar_record(model_id, name, price_in, price_out, tps, ttft_ms, *, source="surplus",
+                   list_in=None, list_out=None, samples=100, seller="marketplace"):
+    metadata = {}
+    if list_in is not None and list_out is not None:
+        metadata = {"list_input_per_m": list_in, "list_output_per_m": list_out}
+    return ModelRecord(
+        id=model_id,
+        name=name,
+        metadata=metadata,
+        offers=(
+            Offer(
+                source=source,
+                upstream_model=model_id,
+                input_per_m=price_in,
+                output_per_m=price_out,
+                tps_p50=tps,
+                ttft_p50_ms=ttft_ms,
+                samples=samples,
+                seller=seller,
+            ),
+        ),
+    )
+
+
+class SimilarModelsTests(unittest.TestCase):
+    """Mid-chat model switching: comparable price, measured speed."""
+
+    def setUp(self):
+        self.records = [
+            # current model: $0.20/$1.00 blended 0.36, 54 tok/s
+            similar_record("kimi-k3.1-pro", "Kimi K3.1 Pro", 0.2, 1.0, 54, 7487,
+                           list_in=2.0, list_out=10.0),
+            # cheaper and faster -> must be suggested
+            similar_record("qwen3.8-flash", "Qwen3.8 Flash", 0.05, 0.2, 73, 4108,
+                           list_in=0.15, list_out=0.47, seller="Alibaba DashScope"),
+            # similar price, faster -> suggested, ranked above the cheaper one? no: tps desc
+            similar_record("glm-5.3-flash", "GLM 5.3 Flash", 0.18, 0.9, 61, 2300,
+                           list_in=0.3, list_out=1.0, seller="Zhipu"),
+            # 20x pricier -> outside the band, never suggested
+            similar_record("gpt-5.6-luna", "GPT 5.6 Luna", 4.0, 20.0, 90, 900,
+                           list_in=8.0, list_out=40.0),
+            # no speed measurements -> cannot be compared honestly, excluded
+            similar_record("mystery-model", "Mystery", 0.2, 1.0, None, None),
+        ]
+        adapter = FakeAdapter("surplus", "http://127.0.0.1:1/v1", self.records)
+        self.proxy = ProxyServer(adapters={"surplus": adapter}, config=ProxyConfig(policy="balanced"))
+
+    def test_suggests_comparable_models_ranked_by_speed(self):
+        rows = self.proxy.similar_models("kimi-k3.1-pro")
+        self.assertEqual([row["model"] for row in rows], ["qwen3.8-flash", "glm-5.3-flash"])
+        fastest = rows[0]
+        self.assertEqual(fastest["tps_p50"], 73)
+        self.assertEqual(fastest["ttft_p50_ms"], 4108)
+        self.assertEqual(fastest["seller"], "Alibaba DashScope")
+        self.assertEqual(fastest["switch_model"], "qwen3.8-flash")
+        self.assertEqual(fastest["input_per_m"], 0.05)
+
+    def test_rows_carry_discount_and_price_ratio(self):
+        rows = {row["model"]: row for row in self.proxy.similar_models("kimi-k3.1-pro")}
+        qwen = rows["qwen3.8-flash"]
+        # list blend 0.8*0.15+0.2*0.47=0.214 vs offer blend 0.08 -> 63% off
+        self.assertEqual(qwen["discount_pct"], 63)
+        # offer blend 0.08 vs current blend 0.36 -> 0.22 of the price
+        self.assertEqual(qwen["price_ratio"], 0.22)
+
+    def test_current_model_is_never_suggested_against_itself(self):
+        self.assertNotIn("kimi-k3.1-pro", [r["model"] for r in self.proxy.similar_models("kimi-k3.1-pro")])
+
+    def test_limit_is_respected(self):
+        self.assertEqual(len(self.proxy.similar_models("kimi-k3.1-pro", limit=1)), 1)
+
+    def test_unknown_model_returns_empty(self):
+        self.assertEqual(self.proxy.similar_models("does-not-exist"), [])
+
+    def test_http_endpoint_serves_similar_models(self):
+        port = self.proxy.start(port=0)
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/llmux/similar-models?model=kimi-k3.1-pro", timeout=10
+            ) as response:
+                body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertEqual(body["data"][0]["model"], "qwen3.8-flash")
+        finally:
+            self.proxy.stop()
+
+
+class SurplusProviderDetailTests(ProxyCase):
+    """Named Surplus providers replace the anonymous aggregate route."""
+
+    def setUp(self):
+        super().setUp()
+        self.detail = FakeDetailAdapter(
+            "surplus", self.surplus.base_url, self.surplus_records, detail=detail_offers()
+        )
+        self.proxy.adapters["surplus"] = self.detail
+        self.proxy._detail_cache.clear()
+
+    def test_options_name_real_surplus_providers(self):
+        options = self.proxy.seller_options("kimi-k3.1-pro", limit=4)
+        sellers = {option["seller"] for option in options}
+        self.assertIn("Alibaba DashScope \u2014 China", sellers)
+        self.assertIn("InferHub", sellers)
+        self.assertNotIn("marketplace", sellers)
+        dashscope = next(o for o in options if o["provider_id"] == "dashscope-cn")
+        self.assertEqual(dashscope["tps_p50"], 73.3)
+        self.assertEqual(dashscope["ttft_p50_ms"], 4108)
+        self.assertEqual(dashscope["samples"], 736)
+        self.assertEqual(dashscope["source"], "surplus")
+
+    def test_detail_is_cached_per_model(self):
+        self.proxy.seller_options("kimi-k3.1-pro")
+        self.proxy.seller_options("kimi-k3.1-pro")
+        self.assertEqual(self.detail.detail_calls, ["kimi-k3.1-pro"])
+
+    def test_detail_failure_falls_back_to_labelled_aggregate(self):
+        self.proxy.adapters["surplus"] = FakeDetailAdapter(
+            "surplus", self.surplus.base_url, self.surplus_records, detail_error=OSError("detail down")
+        )
+        self.proxy._detail_cache.clear()
+        options = self.proxy.seller_options("kimi-k3.1-pro")
+        surplus_rows = [option for option in options if option["source"] == "surplus"]
+        self.assertEqual(len(surplus_rows), 1)
+        self.assertEqual(surplus_rows[0]["seller"], "Surplus auto")
+        self.assertIsNone(surplus_rows[0]["provider_id"])
+
+    def test_pinned_provider_is_sent_upstream_with_provider_order(self):
+        status, headers, _ = self.completions(model="kimi-k3.1-pro@surplus@provider:dashscope-cn")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["X-LLMUX-Source"], "surplus")
+        self.assertEqual(len(self.surplus.requests), 1)
+        sent = self.surplus.requests[0]["body"]
+        self.assertEqual(sent["provider_order"], ["dashscope-cn"])
+        self.assertEqual(sent["model"], "kimi-k3.1-pro")
+        self.assertEqual(self.antseed.requests, [])
+
+    def test_unpinned_request_carries_no_provider_order(self):
+        status, _, _ = self.completions(model="kimi-k3.1-pro@surplus")
+        self.assertEqual(status, 200)
+        self.assertNotIn("provider_order", self.surplus.requests[0]["body"])
+
+    def test_unknown_provider_pin_is_refused_without_inference(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request_json("/llmux/plan?model=kimi-k3.1-pro@surplus@provider:nope")
+        self.assertEqual(caught.exception.code, 404)
+        self.assertEqual(self.surplus.requests, [])
+
+    def test_paid_route_never_claims_a_full_discount(self):
+        cheap = Offer(
+            source="surplus",
+            upstream_model="kimi-k3.1-pro",
+            input_per_m=0.0001,
+            output_per_m=0.0002,
+            tps_p50=90.0,
+            ttft_p50_ms=500,
+            samples=50,
+            seller="Too Good",
+            provider_id="too-good",
+        )
+        self.proxy.adapters["surplus"] = FakeDetailAdapter(
+            "surplus", self.surplus.base_url, self.surplus_records, detail=[cheap]
+        )
+        self.proxy._detail_cache.clear()
+        options = self.proxy.seller_options("kimi-k3.1-pro")
+        row = next(o for o in options if o["provider_id"] == "too-good")
+        self.assertEqual(row["discount_pct"], 99)
 
 
 if __name__ == "__main__":

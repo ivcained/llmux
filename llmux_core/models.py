@@ -22,6 +22,7 @@ class Offer:
     reputation: float | None = None
     seller: str = ""
     peer_id: str | None = None
+    provider_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class ModelDirective:
     source: str | None = None
     policy: str | None = None
     peer_id: str | None = None
+    provider_id: str | None = None
 
 
 @dataclass(frozen=True)

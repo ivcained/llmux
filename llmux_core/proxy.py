@@ -7,14 +7,14 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .catalog import Catalog
-from .models import ModelDirective, ModelRecord, RouteDecision
+from .models import ModelDirective, ModelRecord, Offer, RouteDecision
 from .routing import NoRouteError, blended_price, choose_offer, parse_model_directive
 
 LOGGER = logging.getLogger("llmux.proxy")
@@ -46,6 +46,9 @@ class ProxyConfig:
     tps_floor: str | None = None
     balanced_tolerance: float = 0.25
     catalog_ttl_seconds: float = 60.0
+    detail_ttl_seconds: float = 120.0
+    similar_price_band: float = 2.0
+    similar_limit: int = 3
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
 
@@ -59,6 +62,8 @@ class ProxyServer:
         self._catalog: Catalog | None = None
         self._catalog_time = 0.0
         self._catalog_lock = threading.Lock()
+        self._detail_cache: dict[str, tuple[float, list[Offer]]] = {}
+        self._detail_lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.source_errors: dict[str, str] = {}
@@ -85,6 +90,49 @@ class ProxyServer:
             if self._catalog is None:
                 raise UpstreamError("no marketplace catalog is available", retryable=True)
             return self._catalog
+
+    def _surplus_detail_offers(self, upstream_model: str) -> list[Offer]:
+        """Named per-provider Surplus offers, cached; empty when unavailable.
+
+        A detail fetch failure must never break routing: the aggregated
+        marketplace offer remains a valid route, it just cannot be pinned to a
+        specific provider.
+        """
+
+        adapter = self.adapters.get("surplus")
+        fetch = getattr(adapter, "provider_offers", None)
+        if not callable(fetch):
+            return []
+        with self._detail_lock:
+            cached = self._detail_cache.get(upstream_model)
+            if cached is not None and time.monotonic() - cached[0] < self.config.detail_ttl_seconds:
+                return cached[1]
+        try:
+            raw = fetch(upstream_model)
+        except Exception as exc:  # noqa: BLE001 - detail is best-effort enrichment
+            LOGGER.debug("surplus detail unavailable for %s: %s", upstream_model, exc)
+            return []
+        offers = [offer for offer in raw if isinstance(offer, Offer)] if isinstance(raw, (list, tuple)) else []
+        with self._detail_lock:
+            self._detail_cache[upstream_model] = (time.monotonic(), offers)
+        return offers
+
+    def _routable_offers(self, record: ModelRecord) -> tuple[Offer, ...]:
+        """Offers a user may choose: Antseed peers plus named Surplus providers.
+
+        The aggregated Surplus offer is only kept as a fallback when the detail
+        endpoints yield nothing, and is labelled so the card never shows a
+        nameless "marketplace" seller next to real provider names.
+        """
+
+        others = [offer for offer in record.offers if offer.source != "surplus"]
+        aggregate = next((offer for offer in record.offers if offer.source == "surplus"), None)
+        if aggregate is None:
+            return tuple(others)
+        detail = self._surplus_detail_offers(aggregate.upstream_model)
+        if detail:
+            return tuple(others + detail)
+        return tuple(others + [replace(aggregate, seller=aggregate.seller or "Surplus auto")])
 
     def _route(self, model: str) -> tuple[RouteDecision, ModelDirective, bool]:
         directive = parse_model_directive(model)
@@ -118,7 +166,29 @@ class ProxyServer:
                 applied_policy=policy,
                 reason="seller pinned by user",
             )
-        return decision, directive, directive.source is None and directive.peer_id is None
+        if directive.provider_id:
+            pinned = [
+                offer
+                for offer in self._routable_offers(record)
+                if offer.provider_id == directive.provider_id
+                and offer.healthy
+                and (directive.source is None or offer.source == directive.source)
+            ]
+            if not pinned:
+                raise NoRouteError(f"provider {directive.provider_id} is not available")
+            decision = RouteDecision(
+                requested_model=record.id,
+                upstream_model=pinned[0].upstream_model,
+                offer=pinned[0],
+                policy=policy,
+                applied_policy=policy,
+                reason="Surplus provider pinned by user",
+            )
+        return (
+            decision,
+            directive,
+            directive.source is None and directive.peer_id is None and directive.provider_id is None,
+        )
 
     def _alternate(
         self, record: ModelRecord, decision: RouteDecision, policy: str
@@ -156,7 +226,17 @@ class ProxyServer:
             parts.hostname, parts.port, timeout=self.config.upstream_timeout_seconds
         )
         path = f"{parts.path.rstrip('/')}/chat/completions"
-        body = json.dumps({**payload, "model": decision.upstream_model}).encode()
+        extras: dict = {}
+        build_extra_body = getattr(adapter, "build_extra_body", None)
+        if callable(build_extra_body):
+            try:
+                produced = build_extra_body(decision)
+            except Exception as exc:  # noqa: BLE001 - never lose a request over metadata
+                LOGGER.debug("build_extra_body failed for %s: %s", decision.offer.source, exc)
+                produced = None
+            if isinstance(produced, dict):
+                extras = produced
+        body = json.dumps({**payload, **extras, "model": decision.upstream_model}).encode()
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if stream else "application/json",
@@ -244,7 +324,7 @@ class ProxyServer:
         if record is None:
             return []
         offers = [
-            offer for offer in record.offers
+            offer for offer in self._routable_offers(record)
             if offer.healthy and (offer.tps_p50 or offer.ttft_p50_ms)
         ]
         if not offers:
@@ -275,6 +355,9 @@ class ProxyServer:
             discount_pct = None
             if list_blended and list_blended > 0:
                 discount_pct = max(0, min(100, round((1 - blended_price(offer) / list_blended) * 100)))
+                if discount_pct >= 100 and blended_price(offer) > 0:
+                    # A non-zero price is never 100% off; keep the badge honest.
+                    discount_pct = 99
             ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
             estimated_reply_seconds = (
                 ttft_s + 1000.0 / offer.tps_p50 if offer.tps_p50 else ttft_s
@@ -284,6 +367,7 @@ class ProxyServer:
                     "source": offer.source,
                     "seller": offer.seller or offer.source,
                     "peer_id": offer.peer_id,
+                    "provider_id": offer.provider_id,
                     "upstream_model": offer.upstream_model,
                     "tps_p50": offer.tps_p50,
                     "ttft_p50_ms": offer.ttft_p50_ms,
@@ -304,6 +388,84 @@ class ProxyServer:
                 }
             )
         return result
+
+    def similar_models(
+        self, model: str, *, limit: int | None = None, price_band: float | None = None
+    ) -> list[dict]:
+        """Comparable models for a mid-chat switch, ranked by measured speed.
+
+        Cheaper is welcome, pricier is capped: a suggestion may cost up to
+        `price_band` times the current route's blended price, never more. A
+        model without TPS measurements is never proposed as "similar or
+        better" performance, and every price shown is the one the current
+        policy would actually route to.
+        """
+
+        limit = self.config.similar_limit if limit is None else limit
+        band = self.config.similar_price_band if price_band is None else price_band
+        catalog = self._get_catalog()
+        current = catalog.get(model)
+        if current is None:
+            return []
+        try:
+            current_offer = choose_offer(
+                current,
+                policy=self.config.policy,
+                balanced_tolerance=self.config.balanced_tolerance,
+            ).offer
+        except NoRouteError:
+            return []
+        current_blend = blended_price(current_offer)
+        if current_blend <= 0:
+            return []
+
+        rows: list[dict] = []
+        for record in catalog.records:
+            if record.id == current.id:
+                continue
+            try:
+                offer = choose_offer(
+                    record,
+                    policy=self.config.policy,
+                    balanced_tolerance=self.config.balanced_tolerance,
+                ).offer
+            except NoRouteError:
+                continue
+            if offer.tps_p50 is None:
+                continue
+            blend = blended_price(offer)
+            ratio = blend / current_blend
+            if ratio > band:
+                continue
+            list_input = record.metadata.get("list_input_per_m")
+            list_output = record.metadata.get("list_output_per_m")
+            discount_pct = None
+            if isinstance(list_input, (int, float)) and isinstance(list_output, (int, float)):
+                list_blend = 0.8 * list_input + 0.2 * list_output
+                if list_blend > 0:
+                    discount_pct = max(0, min(100, round((1 - blend / list_blend) * 100)))
+                    if discount_pct >= 100 and blend > 0:
+                        discount_pct = 99
+            rows.append(
+                {
+                    "model": record.id,
+                    "name": record.name or record.id,
+                    "source": offer.source,
+                    "seller": offer.seller or offer.source,
+                    "provider_id": offer.provider_id,
+                    "peer_id": offer.peer_id,
+                    "input_per_m": offer.input_per_m,
+                    "output_per_m": offer.output_per_m,
+                    "tps_p50": offer.tps_p50,
+                    "ttft_p50_ms": offer.ttft_p50_ms,
+                    "samples": offer.samples,
+                    "discount_pct": discount_pct,
+                    "price_ratio": round(ratio, 2),
+                    "switch_model": record.id,
+                }
+            )
+        rows.sort(key=lambda row: (-(row["tps_p50"] or 0.0), row["price_ratio"]))
+        return rows[:limit]
 
     def plan_route(self, body: dict) -> dict:
         """Return the routing decision for a request without calling upstream."""
@@ -406,6 +568,14 @@ class ProxyServer:
                         self._json(
                             200,
                             {"object": "list", "data": proxy.seller_options(model)},
+                        )
+                        return
+                    if path == "/llmux/similar-models":
+                        raw_query = urlsplit(self.path).query
+                        model = parse_qs(raw_query).get("model", [""])[0]
+                        self._json(
+                            200,
+                            {"object": "list", "data": proxy.similar_models(model)},
                         )
                         return
                     self._error(404, "not_found", "not found")

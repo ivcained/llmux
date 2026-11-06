@@ -43,6 +43,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'llmux'
 const MAX_OPTIONS = 4
+const MAX_SIMILAR = 3
 
 let restFn = null
 
@@ -53,15 +54,20 @@ export function bareModel(model) {
 
 /**
  * Canonical route target for a chosen offer. A server-provided `canonical`
- * field wins verbatim; otherwise the bare model is re-pinned to the offer's
- * source (and peer, when the offer names one).
+ * field wins verbatim (that is how a model switch names its target); otherwise
+ * the bare model is re-pinned to the offer's source and, when the offer names
+ * one, its Surplus provider or Antseed peer.
  */
 export function routeTarget(option, base) {
   const canonical = typeof option?.canonical === 'string' ? option.canonical.trim() : ''
   if (canonical) return canonical
   const source = String(option?.source || '').trim()
-  const peer = option?.peer_id ? `@peer:${option.peer_id}` : ''
-  return `${bareModel(base)}@${source}${peer}`
+  const pin = option?.provider_id
+    ? `@provider:${option.provider_id}`
+    : option?.peer_id
+      ? `@peer:${option.peer_id}`
+      : ''
+  return `${bareModel(base)}@${source}${pin}`
 }
 
 /** Uncached re-send cost in USD, or null when either input is unreported. */
@@ -135,6 +141,36 @@ async function validateRoute(model) {
   await restFn('/validate-route', { method: 'POST', body: { model } })
 }
 
+/**
+ * Comparable models for a mid-chat switch. Suggestions are a bonus section: a
+ * failure here must not blank the seller list, so it resolves to [] and the
+ * section simply does not render.
+ */
+async function fetchSimilar(model) {
+  if (!restFn) return []
+  try {
+    const body = await restFn(`/similar-models?model=${encodeURIComponent(model)}`)
+    return Array.isArray(body?.data) ? body.data : []
+  } catch {
+    return []
+  }
+}
+
+/** Normalize a similar-model row into the shape OfferRow renders. */
+function modelRow(row) {
+  return {
+    ...row,
+    kind: 'model',
+    label: row.name || row.model,
+    canonical: row.switch_model || row.model,
+    note:
+      typeof row.price_ratio === 'number'
+        ? `${row.price_ratio}\u00d7 the current price \u00b7 via ${row.seller || row.source}`
+        : `via ${row.seller || row.source}`,
+    cache_warning: row.cache_warning || { text: 'model switch' },
+  }
+}
+
 /** One big-number stat: value on top, small uppercase caption below. */
 function StatBlock({ value, label, accent = false }) {
   return jsxs('div', {
@@ -181,7 +217,7 @@ function OfferRow({ option, contextTokens, onChoose }) {
       jsxs('div', {
         className: 'flex items-center gap-2',
         children: [
-          jsx('span', { className: 'truncate text-sm font-medium', children: option.seller }),
+          jsx('span', { className: 'truncate text-sm font-medium', children: option.label || option.seller }),
           jsx(Badge, { variant: 'outline', children: option.source }),
           jsxs('div', {
             className: 'ml-auto flex shrink-0 items-center gap-2',
@@ -215,6 +251,12 @@ function OfferRow({ option, contextTokens, onChoose }) {
         className: 'mt-2 text-[11px] text-(--ui-text-secondary)',
         children: metaLine(option),
       }),
+      option.note
+        ? jsx('div', {
+            className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
+            children: option.note,
+          })
+        : null,
       cache
         ? jsx('div', {
             className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
@@ -222,6 +264,13 @@ function OfferRow({ option, contextTokens, onChoose }) {
           })
         : null,
     ],
+  })
+}
+
+function SectionLabel({ children }) {
+  return jsx('div', {
+    className: 'text-[10px] uppercase tracking-wide text-(--ui-text-secondary)',
+    children,
   })
 }
 
@@ -238,20 +287,28 @@ function SwitchDialog({ onClose }) {
     queryFn: () => fetchOptions(base),
     enabled: Boolean(base),
   })
+  const similarQuery = useQuery({
+    queryKey: ['llmux', 'similar-models', base],
+    queryFn: () => fetchSimilar(base),
+    enabled: Boolean(base),
+  })
   const options = (Array.isArray(query.data) ? query.data : []).slice(0, MAX_OPTIONS)
+  const similar = (Array.isArray(similarQuery.data) ? similarQuery.data : []).slice(0, MAX_SIMILAR)
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
 
   function notifyPinned(option) {
+    const name = option.label || option.seller
     host.notify({
       kind: 'success',
-      message: `Pinned ${option.seller}. The next turn re-sends the full chat on this route; nothing replays automatically.`,
+      message: `Pinned ${name}. The next turn re-sends the full chat on this route; nothing replays automatically.`,
     })
   }
 
   function notifyDeferred(option) {
+    const name = option.label || option.seller
     host.notify({
       kind: 'info',
-      message: `Switch to ${option.seller} is queued by the gateway and applies at the next turn start. The current turn is untouched.`,
+      message: `Switch to ${name} is queued by the gateway and applies at the next turn start. The current turn is untouched.`,
     })
   }
 
@@ -369,29 +426,61 @@ function SwitchDialog({ onClose }) {
                 children: 'No measured offers for this model. Start the proxy or wait for the catalog to refresh.',
               })
             : jsxs('div', {
-                className: 'flex max-h-[50vh] flex-col gap-2 overflow-y-auto',
-                children: options.map(option =>
-                  jsx(
-                    OfferRow,
-                    {
-                      option,
-                      contextTokens,
-                      onChoose: option => setSelected({ option, binding: captureBinding() }),
-                    },
-                    `${option.source}:${option.peer_id || 'default'}`,
-                  ),
-                ),
+                className: 'flex max-h-[50vh] flex-col gap-3 overflow-y-auto',
+                children: [
+                  jsxs('div', {
+                    className: 'flex flex-col gap-2',
+                    children: [
+                      jsx(SectionLabel, { children: 'Measured routes for this model' }),
+                      options.map(option =>
+                        jsx(
+                          OfferRow,
+                          {
+                            option,
+                            contextTokens,
+                            onChoose: option => setSelected({ option, binding: captureBinding() }),
+                          },
+                          `${option.source}:${option.provider_id || option.peer_id || 'default'}`,
+                        ),
+                      ),
+                    ],
+                  }),
+                  similar.length > 0
+                    ? jsxs('div', {
+                        className: 'flex flex-col gap-2',
+                        children: [
+                          jsx(SectionLabel, {
+                            children: 'Similar models in this price range, ranked by measured speed',
+                          }),
+                          similar.map(row => {
+                            const option = modelRow(row)
+                            return jsx(
+                              OfferRow,
+                              {
+                                option,
+                                contextTokens,
+                                onChoose: picked => setSelected({ option: picked, binding: captureBinding() }),
+                              },
+                              `model:${row.model}`,
+                            )
+                          }),
+                        ],
+                      })
+                    : null,
+                ],
               }),
       jsx(ConfirmDialog, {
         open: selected !== null,
         onClose: () => setSelected(null),
         onConfirm: () => applySwitch(selected),
-        title: `Switch to ${selected?.option?.seller || 'seller'}?`,
+        title: `Switch to ${selected?.option?.label || selected?.option?.seller || 'this route'}?`,
         description:
-          'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new seller. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.',
-        confirmLabel: 'Switch seller',
+          selected?.option?.kind === 'model'
+            ? 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new model. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.'
+            : 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new seller. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.',
+        confirmLabel: selected?.option?.kind === 'model' ? 'Switch model' : 'Switch seller',
         busyLabel: 'Switching…',
-        cancelLabel: 'Keep current seller',
+        cancelLabel: 'Keep current route',
       }),
     ],
   })

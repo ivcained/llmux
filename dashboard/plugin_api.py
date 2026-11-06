@@ -49,7 +49,7 @@ def ensure_proxy() -> None:
 
 
 def routes() -> list[str]:
-    return ["/seller-options", "/validate-route"]
+    return ["/seller-options", "/similar-models", "/validate-route"]
 
 
 def _read(path: str) -> dict:
@@ -75,6 +75,11 @@ def _read(path: str) -> dict:
 @router.get("/seller-options")
 def seller_options(model: str) -> dict:
     return _read("/llmux/seller-options?" + urllib.parse.urlencode({"model": model}))
+
+
+@router.get("/similar-models")
+def similar_models(model: str) -> dict:
+    return _read("/llmux/similar-models?" + urllib.parse.urlencode({"model": model}))
 
 
 class ValidateRoute(BaseModel):

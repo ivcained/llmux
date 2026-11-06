@@ -26,7 +26,12 @@ class NoRouteError(LookupError):
 
 
 def parse_model_directive(value: str) -> ModelDirective:
-    """Parse ``model[@source][@policy]`` without touching upstream peer pins."""
+    """Parse ``model[@source][@policy][@peer:id|provider:id]``.
+
+    ``peer:`` pins an Antseed seller, ``provider:`` pins a Surplus provider.
+    Both are marketplace-specific, so combining them is an error rather than a
+    silently ignored hint.
+    """
 
     parts = value.strip().split("@")
     model = parts[0].strip()
@@ -35,6 +40,7 @@ def parse_model_directive(value: str) -> ModelDirective:
     source = None
     policy = None
     peer_id = None
+    provider_id = None
     for raw in parts[1:]:
         suffix = raw.strip()
         lowered = suffix.lower()
@@ -43,13 +49,26 @@ def parse_model_directive(value: str) -> ModelDirective:
             if not peer_id:
                 raise ValueError("peer directive requires an id")
             continue
+        if lowered.startswith("provider:"):
+            provider_id = suffix.split(":", 1)[1].strip()
+            if not provider_id:
+                raise ValueError("provider directive requires an id")
+            continue
         if lowered in SOURCE_ALIASES:
             source = SOURCE_ALIASES[lowered]
         elif lowered in POLICY_ALIASES:
             policy = POLICY_ALIASES[lowered]
         else:
             raise ValueError(f"unknown LLMUX model directive: @{raw}")
-    return ModelDirective(model=model, source=source, policy=policy, peer_id=peer_id)
+    if peer_id and provider_id:
+        raise ValueError("peer: and provider: pins are mutually exclusive")
+    return ModelDirective(
+        model=model,
+        source=source,
+        policy=policy,
+        peer_id=peer_id,
+        provider_id=provider_id,
+    )
 
 
 def blended_price(offer: Offer) -> float:

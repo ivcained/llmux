@@ -1,0 +1,44 @@
+{
+ "model": "qwen3.8-flash",
+ "window_days": 1,
+ "providers": [
+  {
+   "provider": "dashscope-cn",
+   "requests": 128546,
+   "failures": 161,
+   "sellers": 4,
+   "uptime_pct": 99.9,
+   "avg_latency_ms": 65090,
+   "p50_latency_ms": 33570,
+   "p90_latency_ms": 203214,
+   "p95_latency_ms": 203214,
+   "p99_latency_ms": 274339,
+   "ttft_samples": 20099,
+   "ttft_p50_ms": 4108,
+   "ttft_p90_ms": 24867,
+   "route_overhead_p50_ms": 36.64,
+   "tps_samples": 736,
+   "tps_p50": 73.3,
+   "cache_hit_rate_pct": 51.3
+  },
+  {
+   "provider": "inferhub",
+   "requests": 102,
+   "failures": 16534,
+   "sellers": 12,
+   "uptime_pct": 0.6,
+   "avg_latency_ms": 34549,
+   "p50_latency_ms": 33570,
+   "p90_latency_ms": 111503,
+   "p95_latency_ms": 111503,
+   "p99_latency_ms": null,
+   "ttft_samples": 72,
+   "ttft_p50_ms": 33570,
+   "ttft_p90_ms": 82595,
+   "route_overhead_p50_ms": 36.64,
+   "tps_samples": 2,
+   "tps_p50": null,
+   "cache_hit_rate_pct": 68.2
+  }
+ ]
+}

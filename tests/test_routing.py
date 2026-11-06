@@ -33,6 +33,20 @@ class ModelDirectiveTests(unittest.TestCase):
         self.assertEqual(directive.peer_id, "d19ffae0")
         self.assertEqual(directive.source, "antseed")
 
+    def test_provider_suffix_pins_one_surplus_provider(self):
+        directive = parse_model_directive("kimi-k3.1-pro@surplus@provider:dashscope-cn")
+        self.assertEqual(directive.provider_id, "dashscope-cn")
+        self.assertEqual(directive.source, "surplus")
+        self.assertIsNone(directive.peer_id)
+
+    def test_provider_suffix_requires_an_id(self):
+        with self.assertRaises(ValueError):
+            parse_model_directive("kimi-k3.1-pro@provider:")
+
+    def test_peer_and_provider_pins_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            parse_model_directive("kimi-k3.1-pro@peer:d19ffae0@provider:dashscope-cn")
+
 
 class CheapestPolicyTests(unittest.TestCase):
     def test_cheapest_uses_blended_token_price(self):

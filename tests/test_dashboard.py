@@ -21,6 +21,10 @@ class DashboardRouteTests(unittest.TestCase):
         api = _load_api()
         self.assertIn("/seller-options", api.routes())
 
+    def test_route_table_exposes_similar_models(self):
+        api = _load_api()
+        self.assertIn("/similar-models", api.routes())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import __version__
+from . import __version__, surplus_detail
 from .catalog import canonical_model_id
 from .models import ModelRecord, Offer
 
@@ -42,6 +42,27 @@ class SurplusAdapter:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+
+    @property
+    def api_base(self) -> str:
+        """Origin of the API host, without the ``/v1`` inference path."""
+
+        parts = urlsplit(self.base_url)
+        return f"{parts.scheme}://{parts.netloc}"
+
+    def provider_offers(self, model_id: str) -> list[Offer]:
+        """Named per-provider offers for one model, joined with measured speed."""
+
+        return surplus_detail.fetch_provider_offers(
+            model_id, base_url=self.api_base, timeout=self.timeout
+        )
+
+    @staticmethod
+    def build_extra_body(decision: Any) -> dict:
+        """Pin the request to a chosen Surplus provider when one was selected."""
+
+        provider_id = getattr(decision.offer, "provider_id", None)
+        return {"provider_order": [provider_id]} if provider_id else {}
 
     @staticmethod
     def parse_catalog(models_payload: dict, marketplace_payload: dict) -> list[ModelRecord]:
