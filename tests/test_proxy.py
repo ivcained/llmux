@@ -474,15 +474,18 @@ class SimilarModelsTests(unittest.TestCase):
             # current model: $0.20/$1.00 blended 0.36, 54 tok/s
             similar_record("kimi-k3.1-pro", "Kimi K3.1 Pro", 0.2, 1.0, 54, 7487,
                            list_in=2.0, list_out=10.0),
-            # cheaper and faster -> must be suggested
-            similar_record("qwen3.8-flash", "Qwen3.8 Flash", 0.05, 0.2, 73, 4108,
-                           list_in=0.15, list_out=0.47, seller="Alibaba DashScope"),
-            # similar price, faster -> suggested, ranked above the cheaper one? no: tps desc
+            # same price range and faster -> suggested first
+            similar_record("qwen3.8-flash", "Qwen3.8 Flash", 0.12, 0.5, 73, 4108,
+                           list_in=0.6, list_out=2.0, seller="Alibaba DashScope"),
+            # same price range, moderately faster -> suggested second
             similar_record("glm-5.3-flash", "GLM 5.3 Flash", 0.18, 0.9, 61, 2300,
                            list_in=0.3, list_out=1.0, seller="Zhipu"),
             # 20x pricier -> outside the band, never suggested
             similar_record("gpt-5.6-luna", "GPT 5.6 Luna", 4.0, 20.0, 90, 900,
                            list_in=8.0, list_out=40.0),
+            # 200x cheaper and "fastest" -> a small model is not a comparable
+            similar_record("tiny-7b", "Tiny 7B", 0.001, 0.004, 900, 200,
+                           list_in=0.01, list_out=0.03),
             # no speed measurements -> cannot be compared honestly, excluded
             similar_record("mystery-model", "Mystery", 0.2, 1.0, None, None),
         ]
@@ -497,15 +500,21 @@ class SimilarModelsTests(unittest.TestCase):
         self.assertEqual(fastest["ttft_p50_ms"], 4108)
         self.assertEqual(fastest["seller"], "Alibaba DashScope")
         self.assertEqual(fastest["switch_model"], "qwen3.8-flash")
-        self.assertEqual(fastest["input_per_m"], 0.05)
+        self.assertEqual(fastest["input_per_m"], 0.12)
 
     def test_rows_carry_discount_and_price_ratio(self):
         rows = {row["model"]: row for row in self.proxy.similar_models("kimi-k3.1-pro")}
         qwen = rows["qwen3.8-flash"]
-        # list blend 0.8*0.15+0.2*0.47=0.214 vs offer blend 0.08 -> 63% off
-        self.assertEqual(qwen["discount_pct"], 63)
-        # offer blend 0.08 vs current blend 0.36 -> 0.22 of the price
-        self.assertEqual(qwen["price_ratio"], 0.22)
+        # list blend 0.8*0.6+0.2*2.0=0.88 vs offer blend 0.196 -> 78% off
+        self.assertEqual(qwen["discount_pct"], 78)
+        # offer blend 0.196 vs current blend 0.36 -> 0.54 of the price
+        self.assertEqual(qwen["price_ratio"], 0.54)
+
+    def test_far_cheaper_small_models_are_not_comparable(self):
+        models = [row["model"] for row in self.proxy.similar_models("kimi-k3.1-pro")]
+        self.assertNotIn("tiny-7b", models)
+        self.assertNotIn("gpt-5.6-luna", models)
+        self.assertNotIn("mystery-model", models)
 
     def test_current_model_is_never_suggested_against_itself(self):
         self.assertNotIn("kimi-k3.1-pro", [r["model"] for r in self.proxy.similar_models("kimi-k3.1-pro")])

@@ -116,7 +116,7 @@ class SurplusAdapter:
                         ttft_p50_ms=market.get("ttft_p50_ms"),
                         samples=int(market.get("tps_samples") or 0),
                         healthy=int(market.get("healthy_seller_count") or 0) > 0,
-                        seller="marketplace",
+                        seller="Surplus auto",
                     )
                 )
             if list_input is None and direct_in:

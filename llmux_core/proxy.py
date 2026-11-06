@@ -394,11 +394,13 @@ class ProxyServer:
     ) -> list[dict]:
         """Comparable models for a mid-chat switch, ranked by measured speed.
 
-        Cheaper is welcome, pricier is capped: a suggestion may cost up to
-        `price_band` times the current route's blended price, never more. A
-        model without TPS measurements is never proposed as "similar or
-        better" performance, and every price shown is the one the current
-        policy would actually route to.
+        "Same price range" is a symmetric band: a suggestion must cost between
+        1/`price_band` and `price_band` times the current route's blended
+        price. The lower bound matters as much as the upper one, otherwise a
+        7B model at 3% of the price outranks a flagship on raw tokens per
+        second and gets presented as "similar". A model without TPS
+        measurements is never proposed as similar-or-better performance, and
+        every price shown is the one the current policy would route to.
         """
 
         limit = self.config.similar_limit if limit is None else limit
@@ -435,7 +437,7 @@ class ProxyServer:
                 continue
             blend = blended_price(offer)
             ratio = blend / current_blend
-            if ratio > band:
+            if ratio > band or ratio < 1.0 / band:
                 continue
             list_input = record.metadata.get("list_input_per_m")
             list_output = record.metadata.get("list_output_per_m")
