@@ -135,14 +135,30 @@ async function validateRoute(model) {
   await restFn('/validate-route', { method: 'POST', body: { model } })
 }
 
-function timingLine(option) {
-  const tps = typeof option.tps_p50 === 'number' ? `${option.tps_p50} tok/s` : 'tok/s unknown'
+/** One big-number stat: value on top, small uppercase caption below. */
+function StatBlock({ value, label, accent = false }) {
+  return jsxs('div', {
+    className: 'min-w-0',
+    children: [
+      jsx('div', {
+        className: `truncate text-lg font-semibold tabular-nums leading-tight${accent ? ' text-(--ui-accent)' : ''}`,
+        children: value,
+      }),
+      jsx('div', {
+        className: 'mt-0.5 text-[10px] uppercase tracking-wide text-(--ui-text-secondary)',
+        children: label,
+      }),
+    ],
+  })
+}
+
+function metaLine(option) {
   const reply =
     typeof option.estimated_reply_seconds === 'number'
       ? `~${option.estimated_reply_seconds}s estimated for 1000 output tokens`
       : 'reply estimate unknown'
   const samples = typeof option.samples === 'number' ? `${option.samples} samples` : 'samples unknown'
-  return `median TTFT ${fmtMs(option.ttft_p50_ms)} · median ${tps} · ${reply} · ${samples}`
+  return `${reply} · ${samples}`
 }
 
 function cacheLine(option, contextTokens) {
@@ -158,54 +174,53 @@ function cacheLine(option, contextTokens) {
 
 function OfferRow({ option, contextTokens, onChoose }) {
   const cache = option.cache_warning
+  const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : 'unknown'
   return jsxs('div', {
-    className: 'flex items-center justify-between gap-2 rounded-md border border-(--ui-stroke-secondary) px-3 py-2',
+    className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2.5',
     children: [
       jsxs('div', {
-        className: 'min-w-0 flex-1',
+        className: 'flex items-center gap-2',
         children: [
+          jsx('span', { className: 'truncate text-sm font-medium', children: option.seller }),
+          jsx(Badge, { variant: 'outline', children: option.source }),
           jsxs('div', {
-            className: 'flex items-center gap-2',
+            className: 'ml-auto flex shrink-0 items-center gap-2',
             children: [
-              jsx('span', { className: 'truncate text-sm font-medium', children: option.seller }),
-              jsx(Badge, { variant: 'outline', children: option.source }),
               typeof option.discount_pct === 'number'
                 ? jsx('span', {
-                    className: 'ml-auto shrink-0 text-sm font-semibold text-(--ui-accent)',
+                    className: 'text-sm font-semibold text-(--ui-accent)',
                     children: `${option.discount_pct}% off list`,
                   })
                 : null,
+              jsx(Button, {
+                size: 'sm',
+                variant: 'outline',
+                onClick: () => onChoose(option),
+                children: 'Switch',
+              }),
             ],
           }),
-          jsx('div', {
-            className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
-            children: timingLine(option),
-          }),
-          jsxs('div', {
-            className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
-            children: [
-              'In ',
-              jsx('span', { className: 'font-semibold text-(--ui-accent)', children: fmtPrice(option.input_per_m) }),
-              ' · Out ',
-              jsx('span', { className: 'font-semibold text-(--ui-accent)', children: fmtPrice(option.output_per_m) }),
-              ' /M tok',
-            ],
-          }),
-          cache
-            ? jsx('div', {
-                className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
-                children: cacheLine(option, contextTokens),
-              })
-            : null,
         ],
       }),
-      jsx(Button, {
-        size: 'sm',
-        variant: 'outline',
-        className: 'shrink-0',
-        onClick: () => onChoose(option),
-        children: 'Switch',
+      jsxs('div', {
+        className: 'mt-2 grid grid-cols-4 gap-2',
+        children: [
+          jsx(StatBlock, { value: fmtPrice(option.input_per_m), label: 'in /M tok', accent: true }),
+          jsx(StatBlock, { value: fmtPrice(option.output_per_m), label: 'out /M tok', accent: true }),
+          jsx(StatBlock, { value: tps, label: 'median tok/s' }),
+          jsx(StatBlock, { value: fmtMs(option.ttft_p50_ms), label: 'median first token' }),
+        ],
       }),
+      jsx('div', {
+        className: 'mt-2 text-[11px] text-(--ui-text-secondary)',
+        children: metaLine(option),
+      }),
+      cache
+        ? jsx('div', {
+            className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
+            children: cacheLine(option, contextTokens),
+          })
+        : null,
     ],
   })
 }
