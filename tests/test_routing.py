@@ -20,12 +20,18 @@ class ModelDirectiveTests(unittest.TestCase):
         self.assertEqual(directive.model, "kimi-k3.1-pro")
         self.assertIsNone(directive.source)
         self.assertIsNone(directive.policy)
+        self.assertIsNone(directive.peer_id)
 
     def test_suffixes_pin_source_and_policy(self):
         directive = parse_model_directive("kimi-k3.1-pro@antseed@fast")
         self.assertEqual(directive.model, "kimi-k3.1-pro")
         self.assertEqual(directive.source, "antseed")
         self.assertEqual(directive.policy, "fastest")
+
+    def test_peer_suffix_pins_one_seller(self):
+        directive = parse_model_directive("kimi-k3.1-pro@antseed@peer:d19ffae0")
+        self.assertEqual(directive.peer_id, "d19ffae0")
+        self.assertEqual(directive.source, "antseed")
 
 
 class CheapestPolicyTests(unittest.TestCase):

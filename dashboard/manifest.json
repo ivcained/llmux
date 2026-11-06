@@ -1,0 +1,14 @@
+{
+  "name": "llmux",
+  "label": "LLMUX",
+  "description": "Live seller options for LLMUX: TTFT, TPS, estimated reply time, price and cache cost before a mid-chat seller switch.",
+  "icon": "Pulse",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/llmux",
+    "position": "after:skills",
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
