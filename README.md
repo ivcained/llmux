@@ -32,7 +32,37 @@ The full concept, decisions, risk review, and build plan live in [`concepts_brie
 
 Antseed is optional. LLMUX works with Surplus alone and marks Antseed unavailable when its buyer proxy is not running.
 
-## Development
+## Running the proxy
+
+```bash
+export SURPLUS_API_KEY="inf_..."
+export LLMUX_POLICY="balanced"          # cheapest | fastest | balanced
+export LLMUX_TPS_FLOOR="mid"            # optional: low | mid | high
+python -m llmux_core --port 8378
+```
+
+The proxy binds to `127.0.0.1` only by default. Non-local binding requires `LLMUX_ALLOW_REMOTE=1`.
+
+Endpoints:
+
+- `GET /health` returns policy, floor, and per-marketplace catalog errors.
+- `GET /v1/models` returns the deduplicated union catalog with `sources` on every model.
+- `GET /v1/models/<id>` returns normalized offers, prices, TPS, TTFT, sample counts, and health.
+- `POST /v1/chat/completions` routes one request and passes JSON or SSE through.
+
+Model ids accept routing directives:
+
+```text
+kimi-k3.1-pro              policy decides the marketplace
+kimi-k3.1-pro@surplus      pin Surplus
+kimi-k3.1-pro@antseed      pin Antseed
+kimi-k3.1-pro@fastest      pin the policy for this request
+kimi-k3.1-pro@antseed@cheap
+```
+
+Every routed response carries `X-LLMUX-*` receipt headers: source, requested policy, applied policy, input/output price per million, measured TPS, floor-relaxed flag, and failover origin when one occurred.
+
+The routing proxy is tested against recorded live fixtures and local mock marketplaces. It does not make paid inference calls in its test suite, except for the separate read-only live catalog smoke test.
 
 The plugin is currently validated with:
 

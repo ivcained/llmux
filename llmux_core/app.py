@@ -1,0 +1,31 @@
+"""Composition root: settings become a ready routing proxy."""
+
+from __future__ import annotations
+
+from .adapters import AntseedAdapter, SurplusAdapter
+from .config import Settings
+from .proxy import ProxyConfig, ProxyServer
+
+
+def build_proxy(settings: Settings) -> ProxyServer:
+    surplus = SurplusAdapter(
+        base_url=settings.surplus_base_url,
+        api_key=settings.surplus_api_key,
+        timeout=min(settings.upstream_timeout_seconds, 30.0),
+    )
+    antseed = AntseedAdapter(
+        base_url=settings.antseed_base_url,
+        min_reputation=settings.antseed_min_reputation,
+        timeout=min(settings.upstream_timeout_seconds, 30.0),
+    )
+    return ProxyServer(
+        adapters={"surplus": surplus, "antseed": antseed},
+        config=ProxyConfig(
+            policy=settings.policy,
+            tps_floor=settings.tps_floor,
+            balanced_tolerance=settings.balanced_tolerance,
+            catalog_ttl_seconds=settings.catalog_ttl_seconds,
+            upstream_timeout_seconds=settings.upstream_timeout_seconds,
+            allow_remote=settings.allow_remote,
+        ),
+    )
