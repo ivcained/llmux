@@ -70,6 +70,7 @@ class SurplusAdapter:
             direct_out = float(pricing.get("completion") or 0) * 1_000_000
             market = by_model.get(model_id)
             offers: list[Offer] = []
+            list_input = list_output = None
             if market:
                 input_price = (
                     (market.get("best_input_per_1m") or 0) / 1_000_000 or direct_in
@@ -78,6 +79,11 @@ class SurplusAdapter:
                     (market.get("best_output_per_1m") or 0) / 1_000_000 or direct_out
                 )
                 cached = market.get("best_cache_read_per_1m")
+                direct_in_field = market.get("direct_input_per_1m")
+                direct_out_field = market.get("direct_output_per_1m")
+                if direct_in_field or direct_out_field:
+                    list_input = direct_in_field / 1_000_000 if direct_in_field else None
+                    list_output = direct_out_field / 1_000_000 if direct_out_field else None
                 offers.append(
                     Offer(
                         source=SurplusAdapter.source,
@@ -92,6 +98,15 @@ class SurplusAdapter:
                         seller="marketplace",
                     )
                 )
+            if list_input is None and direct_in:
+                list_input = direct_in
+            if list_output is None and direct_out:
+                list_output = direct_out
+            metadata: dict = {"source": "surplus"}
+            if list_input is not None:
+                metadata["list_input_per_m"] = float(list_input)
+            if list_output is not None:
+                metadata["list_output_per_m"] = float(list_output)
             records.append(
                 ModelRecord(
                     id=canonical_model_id(model_id),
@@ -99,9 +114,9 @@ class SurplusAdapter:
                     offers=tuple(offers),
                     aliases=(model_id,),
                     metadata={
+                        **metadata,
                         "context_length": model.get("context_length"),
                         "supported_features": model.get("supported_features", []),
-                        "source": "surplus",
                     },
                 )
             )

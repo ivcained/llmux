@@ -1,11 +1,13 @@
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from llmux_core.catalog import Catalog
 from llmux_core.models import ModelRecord, Offer
 from llmux_core.proxy import ProxyConfig, ProxyServer
 
@@ -14,6 +16,7 @@ def record(source_price_in=0.2, source_price_out=1.0, source_tps=54):
     return ModelRecord(
         id="kimi-k3.1-pro",
         name="Kimi K3.1 Pro",
+        metadata={"list_input_per_m": 2.0, "list_output_per_m": 10.0},
         offers=(
             Offer(
                 source="surplus",
@@ -332,6 +335,40 @@ class SellerOptionsTests(ProxyCase):
         self.assertEqual(options[0]["upstream_model"], "kimi-k3.1-pro")
         self.assertIsNone(options[0]["cache_warning"]["prompt_tokens"])
         self.assertIsNone(options[0]["cache_warning"]["uncached_input_cost_usd"])
+
+    def test_options_carry_discount_against_list_price(self):
+        options = self.proxy.seller_options("kimi-k3.1-pro", limit=4)
+        by_source = {option["source"]: option for option in options}
+        # Surplus blended 0.36 vs list blended 3.6 -> 90% off.
+        self.assertEqual(by_source["surplus"]["discount_pct"], 90)
+        # Antseed blended 0.213 vs list blended 3.6 -> 94% off.
+        self.assertEqual(by_source["antseed"]["discount_pct"], 94)
+
+    def test_options_without_list_price_report_no_discount(self):
+        self.proxy._catalog = None
+        self.proxy._catalog_time = 0.0
+        bare = ModelRecord(
+            id="kimi-k3.1-pro",
+            name="Kimi K3.1 Pro",
+            offers=tuple(
+                Offer(
+                    source=o.source,
+                    upstream_model=o.upstream_model,
+                    input_per_m=o.input_per_m,
+                    output_per_m=o.output_per_m,
+                    tps_p50=o.tps_p50,
+                    ttft_p50_ms=o.ttft_p50_ms,
+                    samples=o.samples,
+                    peer_id=o.peer_id,
+                )
+                for o in record().offers
+            ),
+        )
+        self.proxy._catalog = Catalog.merge([[bare]])
+        self.proxy._catalog_time = time.monotonic() + 999
+        options = self.proxy.seller_options("kimi-k3.1-pro")
+        self.assertTrue(options)
+        self.assertTrue(all(option["discount_pct"] is None for option in options))
 
     def test_plan_endpoint_validates_exact_pin_without_inference(self):
         status, _, body = self.request_json('/llmux/plan?model=kimi-k3.1-pro@antseed@peer:peer-1')

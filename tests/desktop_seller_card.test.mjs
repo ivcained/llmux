@@ -107,7 +107,13 @@ const OFFER = {
   samples: 12,
   input_per_m: 0.5,
   output_per_m: 1.5,
+  discount_pct: 90,
   estimated_reply_seconds: 18.6,
+  cache_warning: {
+    text: 'The next request sends the current conversation context to the selected route.',
+    prompt_tokens: null,
+    uncached_input_cost_usd: null,
+  },
 }
 
 function offer(overrides = {}) {
@@ -183,7 +189,10 @@ test('renders at most four offers with median labels and a 1000-output-token est
   assert.ok(text.includes('median TTFT 0.4s'), 'p50 TTFT labelled median')
   assert.ok(text.includes('median 55 tok/s'), 'p50 TPS labelled median')
   assert.ok(text.includes('~18.6s estimated for 1000 output tokens'), 'estimate names 1000 output tokens')
-  assert.ok(text.includes('$0.5000/$1.5000 per 1M tokens'), 'pricing shown')
+  assert.ok(text.includes('In $0.5'), 'input price in AntSeed style')
+  assert.ok(text.includes('Out $1.5'), 'output price in AntSeed style')
+  assert.ok(text.includes('/M tok'), 'per-million unit shown')
+  assert.ok(text.includes('90% off list'), 'discount shown against list price')
   assert.ok(text.includes('12 samples'), 'sample count shown')
   assert.ok(!text.includes('Surplus E') && !text.includes('Antseed F'), 'fifth and sixth offers cut')
   unmount()
@@ -191,7 +200,7 @@ test('renders at most four offers with median labels and a 1000-output-token est
 
 test('unknown measurements are rendered as unknown, not guessed', async () => {
   const view = await openDialog({
-    rest: offersPayload([offer({ tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, samples: null })]),
+    rest: offersPayload([offer({ tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, samples: null, discount_pct: null })]),
   })
   await waitFor(() => assert.ok(view.getAllByText('Switch').length === 1))
   const text = view.getByTestId('dialog').textContent
@@ -199,6 +208,7 @@ test('unknown measurements are rendered as unknown, not guessed', async () => {
   assert.ok(text.includes('tok/s unknown'), 'missing TPS honest')
   assert.ok(text.includes('reply estimate unknown'), 'missing estimate honest')
   assert.ok(text.includes('samples unknown'), 'missing samples honest')
+  assert.ok(!text.includes('off list'), 'missing discount honest')
   unmount()
 })
 

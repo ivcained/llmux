@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .catalog import Catalog
 from .models import ModelDirective, ModelRecord, RouteDecision
-from .routing import NoRouteError, choose_offer, parse_model_directive
+from .routing import NoRouteError, blended_price, choose_offer, parse_model_directive
 
 LOGGER = logging.getLogger("llmux.proxy")
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
@@ -265,8 +265,16 @@ class ProxyServer:
             return 0.6 * tps_component + 0.4 * ttft_component
 
         ranked = sorted(offers, key=score, reverse=True)[:limit]
+        list_input = record.metadata.get("list_input_per_m")
+        list_output = record.metadata.get("list_output_per_m")
+        list_blended = None
+        if isinstance(list_input, (int, float)) and isinstance(list_output, (int, float)):
+            list_blended = 0.8 * list_input + 0.2 * list_output
         result = []
         for offer in ranked:
+            discount_pct = None
+            if list_blended and list_blended > 0:
+                discount_pct = max(0, min(100, round((1 - blended_price(offer) / list_blended) * 100)))
             ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
             estimated_reply_seconds = (
                 ttft_s + 1000.0 / offer.tps_p50 if offer.tps_p50 else ttft_s
@@ -282,6 +290,7 @@ class ProxyServer:
                     "samples": offer.samples,
                     "input_per_m": offer.input_per_m,
                     "output_per_m": offer.output_per_m,
+                    "discount_pct": discount_pct,
                     "estimated_reply_seconds": round(estimated_reply_seconds, 1),
                     "cache_warning": {
                         "text": (

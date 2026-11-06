@@ -112,6 +112,12 @@ function fmtMs(ms) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/** AntSeed-style price text: dollar amount, trailing zeros trimmed. */
+function fmtPrice(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 'unknown'
+  return `$${value.toFixed(4).replace(/\.?0+$/, '')}`
+}
+
 async function fetchOptions(model) {
   if (!restFn) {
     throw new Error('LLMUX backend is not enabled. Enable it in Settings > Plugins > LLMUX.')
@@ -129,14 +135,14 @@ async function validateRoute(model) {
   await restFn('/validate-route', { method: 'POST', body: { model } })
 }
 
-function statsLine(option) {
+function timingLine(option) {
   const tps = typeof option.tps_p50 === 'number' ? `${option.tps_p50} tok/s` : 'tok/s unknown'
   const reply =
     typeof option.estimated_reply_seconds === 'number'
       ? `~${option.estimated_reply_seconds}s estimated for 1000 output tokens`
       : 'reply estimate unknown'
   const samples = typeof option.samples === 'number' ? `${option.samples} samples` : 'samples unknown'
-  return `median TTFT ${fmtMs(option.ttft_p50_ms)} · median ${tps} · ${reply} · ${fmtUsd(option.input_per_m)}/${fmtUsd(option.output_per_m)} per 1M tokens · ${samples}`
+  return `median TTFT ${fmtMs(option.ttft_p50_ms)} · median ${tps} · ${reply} · ${samples}`
 }
 
 function cacheLine(option, contextTokens) {
@@ -151,6 +157,7 @@ function cacheLine(option, contextTokens) {
 }
 
 function OfferRow({ option, contextTokens, onChoose }) {
+  const cache = option.cache_warning
   return jsxs('div', {
     className: 'flex items-center justify-between gap-2 rounded-md border border-(--ui-stroke-secondary) px-3 py-2',
     children: [
@@ -162,16 +169,34 @@ function OfferRow({ option, contextTokens, onChoose }) {
             children: [
               jsx('span', { className: 'truncate text-sm font-medium', children: option.seller }),
               jsx(Badge, { variant: 'outline', children: option.source }),
+              typeof option.discount_pct === 'number'
+                ? jsx('span', {
+                    className: 'ml-auto shrink-0 text-sm font-semibold text-(--ui-accent)',
+                    children: `${option.discount_pct}% off list`,
+                  })
+                : null,
             ],
           }),
           jsx('div', {
             className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
-            children: statsLine(option),
+            children: timingLine(option),
           }),
-          jsx('div', {
+          jsxs('div', {
             className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
-            children: cacheLine(option, contextTokens),
+            children: [
+              'In ',
+              jsx('span', { className: 'font-semibold text-(--ui-accent)', children: fmtPrice(option.input_per_m) }),
+              ' · Out ',
+              jsx('span', { className: 'font-semibold text-(--ui-accent)', children: fmtPrice(option.output_per_m) }),
+              ' /M tok',
+            ],
           }),
+          cache
+            ? jsx('div', {
+                className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
+                children: cacheLine(option, contextTokens),
+              })
+            : null,
         ],
       }),
       jsx(Button, {
