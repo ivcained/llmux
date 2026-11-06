@@ -11,7 +11,14 @@ command. Set LLMUX_AUTOSTART=0 to keep registration side-effect free.
 """
 
 import os
+import sys
 from pathlib import Path
+
+# The plugin loader does not guarantee the plugin directory is importable as a
+# top-level path, so make the sibling package resolvable before importing it.
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
 
 from providers import register_provider
 from providers.base import ProviderProfile

@@ -1,7 +1,10 @@
 """Provider registration contract tests for LLMUX."""
 
 import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 # Keep test collection hermetic: importing the plugin package must not spawn
@@ -43,6 +46,38 @@ class ProxyAutostartTests(unittest.TestCase):
     def test_autostart_failure_never_raises(self):
         with mock.patch.object(llmux_module, "ensure_proxy_running", side_effect=RuntimeError("boom")):
             llmux_module.ensure_proxy_autostart()  # must not raise
+
+
+class LoaderImportTests(unittest.TestCase):
+    """Regression: the plugin loader does not put the plugin dir on sys.path.
+
+    A top-level `import llmux_core` at module scope broke provider registration
+    (doctor: "No module named 'llmux_core'"). Load the module the way the loader
+    does: by file path, with only the Hermes root importable.
+    """
+
+    def test_module_imports_without_plugin_dir_on_sys_path(self):
+        repo = Path(__file__).resolve().parents[1]
+        hermes_root = Path.home() / ".hermes" / "hermes-agent"
+        env = dict(os.environ)
+        env["LLMUX_AUTOSTART"] = "0"
+        env["PYTHONPATH"] = str(hermes_root)
+        code = (
+            "import importlib.util;"
+            f"spec = importlib.util.spec_from_file_location('llmux_probe', r'{repo}/__init__.py');"
+            "m = importlib.util.module_from_spec(spec);"
+            "spec.loader.exec_module(m);"
+            "print(m.llmux.name)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("llmux", result.stdout)
 
 
 if __name__ == "__main__":
