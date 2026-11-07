@@ -617,6 +617,30 @@ class CurrentRouteTests(ProxyCase):
         self.assertIn("similar", body)
         self.assertEqual(body["current"]["name"], "Kimi K3.1 Pro")
 
+    def test_pinned_directive_still_lists_sellers_and_similar(self):
+        """After a pin the session model carries directives; the card must not go empty."""
+
+        pinned = "kimi-k3.1-pro@antseed@peer:peer-1"
+        bare_rows = self.proxy.seller_options("kimi-k3.1-pro")
+        pinned_rows = self.proxy.seller_options(pinned)
+        self.assertEqual(
+            [(row["source"], row["seller"]) for row in bare_rows],
+            [(row["source"], row["seller"]) for row in pinned_rows],
+        )
+        self.assertEqual(
+            self.proxy.similar_models(pinned), self.proxy.similar_models("kimi-k3.1-pro")
+        )
+        payload = self.proxy.seller_options_payload(pinned)
+        self.assertTrue(payload["data"])
+        current = payload["current"]
+        assert current is not None
+        self.assertTrue(current["pinned"])
+
+    def test_malformed_directive_yields_empty_sections_not_a_crash(self):
+        self.assertEqual(self.proxy.seller_options("kimi-k3.1-pro@bogus"), [])
+        self.assertEqual(self.proxy.similar_models("kimi-k3.1-pro@bogus"), [])
+        self.assertIsNone(self.proxy.current_route("kimi-k3.1-pro@bogus"))
+
 
 class SurplusProviderDetailTests(ProxyCase):
     """Named Surplus providers replace the anonymous aggregate route."""

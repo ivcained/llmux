@@ -329,10 +329,25 @@ class ProxyServer:
             ),
         )
 
+    @staticmethod
+    def _bare_model(model: str) -> str | None:
+        """Catalog key for a model string that may carry routing directives.
+
+        After a pin the session model reads ``id@source@provider:x``; catalog
+        lookups must use the bare id or the card would go empty exactly when
+        the user most needs to switch away again.
+        """
+
+        try:
+            return parse_model_directive(model).model
+        except ValueError:
+            return None
+
     def seller_options(self, model: str, *, limit: int = 4) -> list[dict]:
         """Return ranked seller options with timings and an honest cache warning."""
 
-        record = self._get_catalog().get(model)
+        bare = self._bare_model(model)
+        record = self._get_catalog().get(bare) if bare else None
         if record is None:
             return []
         offers = [
@@ -441,7 +456,8 @@ class ProxyServer:
         limit = self.config.similar_limit if limit is None else limit
         band = self.config.similar_price_band if price_band is None else price_band
         catalog = self._get_catalog()
-        current = catalog.get(model)
+        bare = self._bare_model(model)
+        current = catalog.get(bare) if bare else None
         if current is None:
             return []
         try:
