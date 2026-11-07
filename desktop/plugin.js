@@ -129,9 +129,25 @@ async function fetchOptions(model) {
     throw new Error('LLMUX backend is not enabled. Enable it in Settings > Plugins > LLMUX.')
   }
   const body = await restFn(`/seller-options?model=${encodeURIComponent(model)}`)
-  const rows = Array.isArray(body?.data) ? body.data : []
-  if (rows[0]?.error) throw new Error(rows[0].error)
-  return rows
+  const options = Array.isArray(body?.data) ? body.data : []
+  if (options[0]?.error) throw new Error(options[0].error)
+  const current = body?.current && typeof body.current === 'object' ? body.current : null
+  let similar = Array.isArray(body?.similar) ? body.similar : null
+  let similarNote = null
+  if (similar === null) {
+    // Older gateway backend: no embedded list. Try the standalone route, and
+    // say plainly when the gateway has not mounted it yet instead of showing
+    // an empty section that looks like "no comparable models exist".
+    try {
+      const extra = await restFn(`/similar-models?model=${encodeURIComponent(model)}`)
+      similar = Array.isArray(extra?.data) ? extra.data : []
+    } catch {
+      similar = []
+      similarNote =
+        'Comparable models are not served by this gateway yet. Restart Hermes to mount the newer LLMUX backend routes.'
+    }
+  }
+  return { options, similar, current, similarNote }
 }
 
 async function validateRoute(model) {
@@ -139,21 +155,6 @@ async function validateRoute(model) {
     throw new Error('LLMUX backend is not enabled. Enable it in Settings > Plugins > LLMUX.')
   }
   await restFn('/validate-route', { method: 'POST', body: { model } })
-}
-
-/**
- * Comparable models for a mid-chat switch. Suggestions are a bonus section: a
- * failure here must not blank the seller list, so it resolves to [] and the
- * section simply does not render.
- */
-async function fetchSimilar(model) {
-  if (!restFn) return []
-  try {
-    const body = await restFn(`/similar-models?model=${encodeURIComponent(model)}`)
-    return Array.isArray(body?.data) ? body.data : []
-  } catch {
-    return []
-  }
 }
 
 /** Normalize a similar-model row into the shape OfferRow renders. */
@@ -208,7 +209,7 @@ function cacheLine(option, contextTokens) {
   return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens · uncached input ${fmtUsd(cost)} on this route`
 }
 
-function OfferRow({ option, contextTokens, onChoose }) {
+function OfferRow({ option, contextTokens, onChoose, isCurrent = false }) {
   const cache = option.cache_warning
   const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : 'unknown'
   return jsxs('div', {
@@ -219,6 +220,7 @@ function OfferRow({ option, contextTokens, onChoose }) {
         children: [
           jsx('span', { className: 'truncate text-sm font-medium', children: option.label || option.seller }),
           jsx(Badge, { variant: 'outline', children: option.source }),
+          isCurrent ? jsx(Badge, { variant: 'outline', children: 'current' }) : null,
           jsxs('div', {
             className: 'ml-auto flex shrink-0 items-center gap-2',
             children: [
@@ -274,6 +276,58 @@ function SectionLabel({ children }) {
   })
 }
 
+/** True when a listed offer is the route the chat is on right now. */
+export function isCurrentRoute(option, current) {
+  if (!current) return false
+  return (
+    option.source === current.source &&
+    (option.provider_id || null) === (current.provider_id || null) &&
+    (option.peer_id || null) === (current.peer_id || null)
+  )
+}
+
+/** "You are here": the model, the seller serving it, and its measured numbers. */
+function CurrentPanel({ current, base }) {
+  if (!current) {
+    return jsxs('div', {
+      className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-[11px] text-(--ui-text-secondary)',
+      children: ['Current model: ', base || 'unknown', ' (route details unavailable)'],
+    })
+  }
+  const tps = typeof current.tps_p50 === 'number' ? String(current.tps_p50) : 'unknown'
+  return jsxs('div', {
+    className: 'rounded-md border border-(--ui-accent) px-3 py-2.5',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx(SectionLabel, { children: 'Current route' }),
+          jsx('span', { className: 'truncate text-sm font-semibold', children: current.name || current.model }),
+          jsx(Badge, { variant: 'outline', children: current.source }),
+          current.pinned ? jsx(Badge, { variant: 'outline', children: 'pinned' }) : null,
+          jsx('span', {
+            className: 'ml-auto shrink-0 text-[11px] text-(--ui-text-secondary)',
+            children: current.seller,
+          }),
+        ],
+      }),
+      jsxs('div', {
+        className: 'mt-2 grid grid-cols-4 gap-2',
+        children: [
+          jsx(StatBlock, { value: fmtPrice(current.input_per_m), label: 'in /M tok', accent: true }),
+          jsx(StatBlock, { value: fmtPrice(current.output_per_m), label: 'out /M tok', accent: true }),
+          jsx(StatBlock, { value: tps, label: 'median tok/s' }),
+          jsx(StatBlock, { value: fmtMs(current.ttft_p50_ms), label: 'median first token' }),
+        ],
+      }),
+      jsx('div', {
+        className: 'mt-2 text-[11px] text-(--ui-text-secondary)',
+        children: `${current.model} \u00b7 ${current.reason}`,
+      }),
+    ],
+  })
+}
+
 function SwitchDialog({ onClose }) {
   const model = useValue(host.state.model)
   const usage = useValue(host.state.focusedUsage)
@@ -287,13 +341,11 @@ function SwitchDialog({ onClose }) {
     queryFn: () => fetchOptions(base),
     enabled: Boolean(base),
   })
-  const similarQuery = useQuery({
-    queryKey: ['llmux', 'similar-models', base],
-    queryFn: () => fetchSimilar(base),
-    enabled: Boolean(base),
-  })
-  const options = (Array.isArray(query.data) ? query.data : []).slice(0, MAX_OPTIONS)
-  const similar = (Array.isArray(similarQuery.data) ? similarQuery.data : []).slice(0, MAX_SIMILAR)
+  const data = query.data || {}
+  const options = (Array.isArray(data.options) ? data.options : []).slice(0, MAX_OPTIONS)
+  const similar = (Array.isArray(data.similar) ? data.similar : []).slice(0, MAX_SIMILAR)
+  const similarNote = typeof data.similarNote === 'string' ? data.similarNote : null
+  const current = data.current || null
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
 
   function notifyPinned(option) {
@@ -388,12 +440,15 @@ function SwitchDialog({ onClose }) {
     children: [
       jsxs(DialogHeader, {
         children: [
-          jsx(DialogTitle, { children: 'Switch seller mid-chat' }),
+          jsx(DialogTitle, { children: 'Switch model or seller mid-chat' }),
           jsx(DialogDescription, {
-            children: `Up to four measured routes for ${base || 'the current model'}. Switching re-sends the whole chat on the new route and drops the cached-prefix discount, so confirm before you pin.`,
+            children: current
+              ? `Current: ${current.name || current.model} via ${current.seller}. Switching re-sends the whole chat on the new route and drops the cached-prefix discount, so confirm before you pin.`
+              : `Current: ${base || 'the selected model'}. Switching re-sends the whole chat on the new route and drops the cached-prefix discount, so confirm before you pin.`,
           }),
         ],
       }),
+      base ? jsx(CurrentPanel, { current, base }) : null,
       loadError
         ? jsx('div', { className: 'rounded border border-(--ui-stroke-secondary) p-3 text-sm', children: loadError })
         : null,
@@ -438,6 +493,7 @@ function SwitchDialog({ onClose }) {
                           {
                             option,
                             contextTokens,
+                            isCurrent: isCurrentRoute(option, current),
                             onChoose: option => setSelected({ option, binding: captureBinding() }),
                           },
                           `${option.source}:${option.provider_id || option.peer_id || 'default'}`,
@@ -466,7 +522,12 @@ function SwitchDialog({ onClose }) {
                           }),
                         ],
                       })
-                    : null,
+                    : similarNote
+                      ? jsx('div', {
+                          className: 'rounded border border-(--ui-stroke-secondary) p-3 text-[11px] text-(--ui-text-secondary)',
+                          children: similarNote,
+                        })
+                      : null,
                 ],
               }),
       jsx(ConfirmDialog, {

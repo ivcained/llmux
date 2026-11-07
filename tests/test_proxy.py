@@ -574,6 +574,50 @@ class SimilarModelsTests(unittest.TestCase):
             self.proxy.stop()
 
 
+class CurrentRouteTests(ProxyCase):
+    """The card must be able to say which model and seller the chat is on."""
+
+    def test_current_route_names_model_and_chosen_seller(self):
+        current = self.proxy.current_route("kimi-k3.1-pro")
+        assert current is not None
+        self.assertEqual(current["model"], "kimi-k3.1-pro")
+        self.assertEqual(current["name"], "Kimi K3.1 Pro")
+        # ProxyCase routes cheapest: the antseed offer is the cheaper blend.
+        self.assertEqual(current["source"], "antseed")
+        self.assertFalse(current["pinned"])
+        self.assertTrue(current["reason"])
+        self.assertEqual(self.surplus.requests, [])
+        self.assertEqual(self.antseed.requests, [])
+
+    def test_current_route_reflects_an_explicit_pin(self):
+        current = self.proxy.current_route("kimi-k3.1-pro@antseed@peer:peer-1")
+        assert current is not None
+        self.assertTrue(current["pinned"])
+        self.assertEqual(current["peer_id"], "peer-1")
+        self.assertEqual(current["reason"], "seller pinned by user")
+        self.assertEqual(current["requested"], "kimi-k3.1-pro@antseed@peer:peer-1")
+
+    def test_current_route_for_an_unroutable_model_is_none(self):
+        self.assertIsNone(self.proxy.current_route("does-not-exist"))
+        self.assertIsNone(self.proxy.current_route("kimi-k3.1-pro@antseed@peer:nope"))
+
+    def test_payload_carries_sellers_similar_and_current(self):
+        payload = self.proxy.seller_options_payload("kimi-k3.1-pro")
+        self.assertEqual(sorted(payload), ["current", "data", "object", "similar"])
+        current = payload["current"]
+        assert current is not None
+        self.assertEqual(current["model"], "kimi-k3.1-pro")
+        self.assertIsInstance(payload["similar"], list)
+        self.assertTrue(payload["data"])
+
+    def test_http_seller_options_response_includes_current_and_similar(self):
+        status, _, body = self.request_json("/llmux/seller-options?model=kimi-k3.1-pro")
+        self.assertEqual(status, 200)
+        self.assertIn("current", body)
+        self.assertIn("similar", body)
+        self.assertEqual(body["current"]["name"], "Kimi K3.1 Pro")
+
+
 class SurplusProviderDetailTests(ProxyCase):
     """Named Surplus providers replace the anonymous aggregate route."""
 

@@ -511,6 +511,56 @@ class ProxyServer:
         rows.sort(key=lambda row: (-(row["tps_p50"] or 0.0), row["price_ratio"]))
         return rows[:limit]
 
+    def current_route(self, model: str) -> dict | None:
+        """The route this model string resolves to right now, with its measurements.
+
+        Answers "which model and seller am I actually on?" without spending a
+        request: the same planner the inference path uses, stopped before any
+        upstream call. None when the model cannot be routed at all.
+        """
+
+        try:
+            decision, directive, _ = self._route(model)
+        except (NoRouteError, ValueError, UpstreamError):
+            return None
+        record = self._get_catalog().get(directive.model)
+        offer = decision.offer
+        return {
+            "model": directive.model,
+            "name": record.name if record and record.name else directive.model,
+            "requested": model,
+            "source": offer.source,
+            "seller": offer.seller or offer.source,
+            "provider_id": offer.provider_id,
+            "peer_id": offer.peer_id,
+            "input_per_m": offer.input_per_m,
+            "output_per_m": offer.output_per_m,
+            "tps_p50": plausible_tps(offer.tps_p50),
+            "ttft_p50_ms": offer.ttft_p50_ms,
+            "samples": offer.samples,
+            "policy": decision.policy,
+            "applied_policy": decision.applied_policy,
+            "floor_relaxed": decision.floor_relaxed,
+            "reason": decision.reason,
+            "pinned": bool(directive.source or directive.peer_id or directive.provider_id),
+        }
+
+    def seller_options_payload(self, model: str) -> dict:
+        """One response carrying sellers, comparable models and the current route.
+
+        The desktop backend mounts its routes once per gateway run, so a newly
+        added endpoint is not reachable until Hermes restarts. Riding along in
+        the already-mounted ``/seller-options`` response keeps new data available
+        without a restart; the standalone endpoints stay for direct API users.
+        """
+
+        return {
+            "object": "list",
+            "data": self.seller_options(model),
+            "similar": self.similar_models(model),
+            "current": self.current_route(model),
+        }
+
     def plan_route(self, body: dict) -> dict:
         """Return the routing decision for a request without calling upstream."""
 
@@ -609,10 +659,7 @@ class ProxyServer:
                     if path == "/llmux/seller-options":
                         raw_query = urlsplit(self.path).query
                         model = parse_qs(raw_query).get("model", [""])[0]
-                        self._json(
-                            200,
-                            {"object": "list", "data": proxy.seller_options(model)},
-                        )
+                        self._json(200, proxy.seller_options_payload(model))
                         return
                     if path == "/llmux/similar-models":
                         raw_query = urlsplit(self.path).query

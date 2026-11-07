@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Guard against a silently shrinking suite: the card's behavior contract has
 # only grown, so a run reporting fewer scenarios than this is a regression.
-MINIMUM_SCENARIOS = 20
+MINIMUM_SCENARIOS = 25
 
 
 class DesktopFlowTests(unittest.TestCase):

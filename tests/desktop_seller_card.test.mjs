@@ -120,13 +120,33 @@ function offer(overrides = {}) {
   return { ...OFFER, ...overrides }
 }
 
-function offersPayload(rows, similar = []) {
+function offersPayload(rows, similar = [], current = null) {
   return async path => {
-    if (path.startsWith('/seller-options')) return { data: rows }
+    if (path.startsWith('/seller-options')) return { data: rows, similar, current }
     if (path.startsWith('/similar-models')) return { data: similar }
     if (path === '/validate-route') return { ok: true, plan: { model: 'planned' } }
     throw new Error(`unexpected rest path: ${path}`)
   }
+}
+
+const CURRENT = {
+  model: 'test-model',
+  name: 'Test Model Pro',
+  requested: 'test-model',
+  source: 'surplus',
+  seller: 'Surplus A',
+  provider_id: null,
+  peer_id: null,
+  input_per_m: 0.5,
+  output_per_m: 1.5,
+  tps_p50: 55,
+  ttft_p50_ms: 400,
+  samples: 12,
+  policy: 'balanced',
+  applied_policy: 'balanced',
+  floor_relaxed: false,
+  reason: 'cheapest offer within 25% of the fastest measured TPS',
+  pinned: false,
 }
 
 const SIMILAR = {
@@ -491,6 +511,52 @@ test('price ratio wording falls back to the routed price when no list basis', as
   const text = view.getByTestId('dialog').textContent
   assert.ok(text.includes('0.8\u00d7 the current price'), 'routed-price basis named')
   assert.ok(!text.includes('list price'), 'no list claim without a list basis')
+  unmount()
+})
+
+test('current route panel names the model, seller, speed and reason', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()], [], CURRENT) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('Current route'), 'panel labelled')
+  assert.ok(text.includes('Test Model Pro'), 'model name shown')
+  assert.ok(text.includes('test-model'), 'model id shown')
+  assert.ok(text.includes('cheapest offer within 25%'), 'routing reason shown')
+  assert.ok(text.includes('Current: Test Model Pro via Surplus A'), 'description names the current route')
+  unmount()
+})
+
+test('the route the chat is already on is badged current', async () => {
+  const view = await openDialog({
+    rest: offersPayload([offer(), offer({ seller: 'Surplus B', peer_id: 'p2' })], [], CURRENT),
+  })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  assert.equal(view.getAllByText('current').length, 1, 'exactly one current badge')
+  unmount()
+})
+
+test('similar models ride inside the seller-options payload', async () => {
+  const rest = async path => {
+    if (path.startsWith('/seller-options')) return { data: [offer()], similar: [SIMILAR], current: CURRENT }
+    if (path === '/validate-route') return { ok: true }
+    throw new Error(`unexpected rest path: ${path}`)
+  }
+  const view = await openDialog({ rest })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  assert.ok(view.getByTestId('dialog').textContent.includes('Qwen3.8 Flash'))
+  unmount()
+})
+
+test('a gateway without the similar route says so instead of staying silent', async () => {
+  const rest = async path => {
+    if (path.startsWith('/seller-options')) return { data: [offer()], current: CURRENT }
+    throw new Error('404: Not Found')
+  }
+  const view = await openDialog({ rest })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('Restart Hermes'), 'restart guidance shown')
+  assert.ok(!text.includes('Similar models in this price range'), 'no empty section header')
   unmount()
 })
 
