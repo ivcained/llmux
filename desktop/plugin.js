@@ -45,6 +45,67 @@ const ID = 'llmux'
 const MAX_OPTIONS = 4
 const MAX_SIMILAR = 3
 
+const SORTS = [
+  { id: 'recommended', label: 'Recommended' },
+  { id: 'speed', label: 'Speed' },
+  { id: 'price', label: 'Price' },
+  { id: 'firstToken', label: 'First token' },
+  { id: 'discount', label: 'Discount' },
+]
+
+/** Finite number, or null so rows without a measurement sort last. */
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** Blended 4:1 input/output price; the server sends it, this is only a fallback. */
+function blendedPerM(row) {
+  const sent = finiteNumber(row?.blended_per_m)
+  if (sent !== null) return sent
+  const input = finiteNumber(row?.input_per_m)
+  const output = finiteNumber(row?.output_per_m)
+  return input === null || output === null ? null : 0.8 * input + 0.2 * output
+}
+
+/** Estimated seconds for a 1000-output-token answer, or null when unmeasured. */
+function replySeconds(row) {
+  const sent = finiteNumber(row?.estimated_reply_seconds)
+  if (sent !== null) return sent
+  const tps = finiteNumber(row?.tps_p50)
+  const ttft = finiteNumber(row?.ttft_p50_ms)
+  if (tps === null) return null
+  return (ttft === null ? 0 : ttft / 1000) + 1000 / tps
+}
+
+/**
+ * Sort rows for the card. 'recommended' keeps the proxy's ranking; the rest
+ * order by one measured value, and rows missing that value sink to the end
+ * instead of being ranked as if they measured zero.
+ */
+export function sortRows(rows, sortId) {
+  const list = Array.isArray(rows) ? [...rows] : []
+  const byNumber = (getValue, { descending = false } = {}) => (a, b) => {
+    const av = getValue(a)
+    const bv = getValue(b)
+    if (av === null && bv === null) return 0
+    if (av === null) return 1
+    if (bv === null) return -1
+    return descending ? bv - av : av - bv
+  }
+  switch (sortId) {
+    case 'price':
+      return list.sort(byNumber(row => blendedPerM(row)))
+    case 'speed':
+      return list.sort(byNumber(row => replySeconds(row)))
+    case 'firstToken':
+      return list.sort(byNumber(row => finiteNumber(row?.ttft_p50_ms)))
+    case 'discount':
+      return list.sort(byNumber(row => finiteNumber(row?.discount_pct), { descending: true }))
+    default:
+      return list
+  }
+}
+
 let restFn = null
 
 /** The model slug without any route suffix (`model@source@peer:x` -> `model`). */
@@ -335,6 +396,7 @@ function SwitchDialog({ onClose }) {
   const contextTokens = typeof usage?.context_used === 'number' && usage.context_used > 0 ? usage.context_used : null
   const [selected, setSelected] = useState(null)
   const [failed, setFailed] = useState(null)
+  const [sort, setSort] = useState('recommended')
 
   const query = useQuery({
     queryKey: ['llmux', 'seller-options', base],
@@ -342,10 +404,14 @@ function SwitchDialog({ onClose }) {
     enabled: Boolean(base),
   })
   const data = query.data || {}
-  const options = (Array.isArray(data.options) ? data.options : []).slice(0, MAX_OPTIONS)
-  const similar = (Array.isArray(data.similar) ? data.similar : []).slice(0, MAX_SIMILAR)
+  // No slice here: the proxy serves a wider candidate set so a price sort can
+  // surface a cheap route the speed ranking would have cut.
+  const options = Array.isArray(data.options) ? data.options : []
+  const similar = Array.isArray(data.similar) ? data.similar : []
   const similarNote = typeof data.similarNote === 'string' ? data.similarNote : null
   const current = data.current || null
+  const sortedOptions = sortRows(options, sort).slice(0, MAX_OPTIONS)
+  const sortedSimilar = sortRows(similar, sort).slice(0, MAX_SIMILAR)
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
 
   function notifyPinned(option) {
@@ -449,6 +515,27 @@ function SwitchDialog({ onClose }) {
         ],
       }),
       base ? jsx(CurrentPanel, { current, base }) : null,
+      base
+        ? jsxs('div', {
+            className: 'flex flex-wrap items-center gap-1',
+            children: [
+              jsx(SectionLabel, { children: 'Sort by' }),
+              SORTS.map(entry =>
+                jsx(
+                  Button,
+                  {
+                    size: 'sm',
+                    variant: sort === entry.id ? 'default' : 'outline',
+                    className: 'h-6 px-2 text-[11px]',
+                    onClick: () => setSort(entry.id),
+                    children: entry.label,
+                  },
+                  entry.id,
+                ),
+              ),
+            ],
+          })
+        : null,
       loadError
         ? jsx('div', { className: 'rounded border border-(--ui-stroke-secondary) p-3 text-sm', children: loadError })
         : null,
@@ -487,7 +574,7 @@ function SwitchDialog({ onClose }) {
                     className: 'flex flex-col gap-2',
                     children: [
                       jsx(SectionLabel, { children: 'Measured routes for this model' }),
-                      options.map(option =>
+                      sortedOptions.map(option =>
                         jsx(
                           OfferRow,
                           {
@@ -496,7 +583,7 @@ function SwitchDialog({ onClose }) {
                             isCurrent: isCurrentRoute(option, current),
                             onChoose: option => setSelected({ option, binding: captureBinding() }),
                           },
-                          `${option.source}:${option.provider_id || option.peer_id || 'default'}`,
+                          `${option.source}:${option.provider_id || option.peer_id || option.seller}`,
                         ),
                       ),
                     ],
@@ -506,9 +593,9 @@ function SwitchDialog({ onClose }) {
                         className: 'flex flex-col gap-2',
                         children: [
                           jsx(SectionLabel, {
-                            children: 'Similar models in this price range, ranked by measured speed',
+                            children: 'Similar models in this price range',
                           }),
-                          similar.map(row => {
+                          sortedSimilar.map(row => {
                             const option = modelRow(row)
                             return jsx(
                               OfferRow,

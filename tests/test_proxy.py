@@ -552,6 +552,11 @@ class SimilarModelsTests(unittest.TestCase):
         self.assertEqual([row["model"] for row in rows], ["qwen3.8-flash"])
         self.assertEqual(rows[0]["price_basis"], "list")
 
+    def test_similar_rows_carry_blended_price(self):
+        for row in self.proxy.similar_models("kimi-k3.1-pro"):
+            expected = 0.8 * row["input_per_m"] + 0.2 * row["output_per_m"]
+            self.assertAlmostEqual(row["blended_per_m"], expected)
+
     def test_current_model_is_never_suggested_against_itself(self):
         self.assertNotIn("kimi-k3.1-pro", [r["model"] for r in self.proxy.similar_models("kimi-k3.1-pro")])
 
@@ -640,6 +645,41 @@ class CurrentRouteTests(ProxyCase):
         self.assertEqual(self.proxy.seller_options("kimi-k3.1-pro@bogus"), [])
         self.assertEqual(self.proxy.similar_models("kimi-k3.1-pro@bogus"), [])
         self.assertIsNone(self.proxy.current_route("kimi-k3.1-pro@bogus"))
+
+    def test_payload_serves_a_wider_candidate_set_for_client_sorting(self):
+        offers = tuple(
+            Offer(
+                source="antseed",
+                upstream_model=f"peer-{i}@kimi-k3-1-pro",
+                input_per_m=0.1 * (i + 1),
+                output_per_m=0.5 * (i + 1),
+                tps_p50=50.0 + i,
+                ttft_p50_ms=1000.0 + 100 * i,
+                samples=100 + i,
+                peer_id=f"peer-{i}",
+                seller=f"Peer {i}",
+            )
+            for i in range(6)
+        )
+        proxy = ProxyServer(
+            adapters={
+                "antseed": FakeAdapter(
+                    "antseed",
+                    "http://127.0.0.1:1/v1",
+                    [ModelRecord(id="kimi-k3.1-pro", name="Kimi K3.1 Pro", offers=offers)],
+                )
+            },
+            config=ProxyConfig(policy="cheapest"),
+        )
+        payload = proxy.seller_options_payload("kimi-k3.1-pro")
+        self.assertGreaterEqual(len(payload["data"]), 5, "card must see more than the API default")
+        self.assertLess(len(proxy.seller_options("kimi-k3.1-pro")), len(payload["data"]))
+        for row in payload["data"]:
+            expected = 0.8 * row["input_per_m"] + 0.2 * row["output_per_m"]
+            self.assertAlmostEqual(row["blended_per_m"], expected)
+        # Config defaults pin the wider card limits.
+        self.assertEqual(ProxyConfig().card_seller_limit, 8)
+        self.assertEqual(ProxyConfig().card_similar_limit, 6)
 
 
 class SurplusProviderDetailTests(ProxyCase):

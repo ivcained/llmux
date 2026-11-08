@@ -560,6 +560,77 @@ test('a gateway without the similar route says so instead of staying silent', as
   unmount()
 })
 
+test('sort control offers five orders and reorders rows live', async () => {
+  const rows = [
+    offer({ seller: 'Fast Route', tps_p50: 100, ttft_p50_ms: 300, estimated_reply_seconds: 10, input_per_m: 1, output_per_m: 4, blended_per_m: 1.6 }),
+    offer({ seller: 'Cheap Route', tps_p50: 40, ttft_p50_ms: 800, estimated_reply_seconds: 25, input_per_m: 0.05, output_per_m: 0.2, blended_per_m: 0.08 }),
+    offer({ seller: 'No Speed', tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, input_per_m: 2, output_per_m: 8, blended_per_m: 3.2 }),
+  ]
+  const view = await openDialog({ rest: offersPayload(rows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 3))
+  for (const label of ['Recommended', 'Speed', 'Price', 'First token', 'Discount']) {
+    assert.ok(view.getByText(label), `sort option rendered: ${label}`)
+  }
+  let text = view.getByTestId('dialog').textContent
+  assert.ok(text.indexOf('Fast Route') < text.indexOf('Cheap Route'), 'recommended order kept')
+  fireEvent.click(view.getByText('Price'))
+  text = view.getByTestId('dialog').textContent
+  assert.ok(text.indexOf('Cheap Route') < text.indexOf('Fast Route'), 'price order: cheapest first')
+  fireEvent.click(view.getByText('Speed'))
+  text = view.getByTestId('dialog').textContent
+  assert.ok(text.indexOf('Fast Route') < text.indexOf('Cheap Route'), 'speed order: fastest first')
+  assert.ok(text.indexOf('No Speed') > text.indexOf('Cheap Route'), 'unmeasured rows sink to the end')
+  unmount()
+})
+
+test('a price sort can surface a cheap route outside the recommended top four', async () => {
+  const rows = [1, 2, 3, 4, 5].map(rank =>
+    offer({
+      seller: `Rank ${rank}`,
+      tps_p50: 100 - rank * 4,
+      ttft_p50_ms: 100 * rank,
+      estimated_reply_seconds: 10 + rank,
+      input_per_m: 1,
+      output_per_m: 4,
+      blended_per_m: 1.6,
+    }),
+  )
+  rows.push(
+    offer({
+      seller: 'Cheapest',
+      tps_p50: 10,
+      ttft_p50_ms: 9000,
+      estimated_reply_seconds: 100,
+      input_per_m: 0.001,
+      output_per_m: 0.004,
+      blended_per_m: 0.00168,
+    }),
+  )
+  const view = await openDialog({ rest: offersPayload(rows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 4))
+  let text = view.getByTestId('dialog').textContent
+  assert.ok(!text.includes('Cheapest'), 'cut under the recommended ranking')
+  fireEvent.click(view.getByText('Price'))
+  text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('Cheapest'), 'price sort surfaces the cheap route')
+  unmount()
+})
+
+test('sorting also applies to the similar models section', async () => {
+  const similarRows = [
+    { ...SIMILAR, model: 'model-a', name: 'Model A', input_per_m: 0.3, output_per_m: 1.0, blended_per_m: 0.44, tps_p50: 60, ttft_p50_ms: 900 },
+    { ...SIMILAR, model: 'model-b', name: 'Model B', input_per_m: 0.02, output_per_m: 0.08, blended_per_m: 0.032, tps_p50: 30, ttft_p50_ms: 1500 },
+  ]
+  const view = await openDialog({ rest: offersPayload([offer()], similarRows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 3))
+  let text = view.getByTestId('dialog').textContent
+  assert.ok(text.indexOf('Model A') < text.indexOf('Model B'), 'recommended order kept')
+  fireEvent.click(view.getByText('Price'))
+  text = view.getByTestId('dialog').textContent
+  assert.ok(text.indexOf('Model B') < text.indexOf('Model A'), 'cheapest similar model first')
+  unmount()
+})
+
 test('exported helpers: routeTarget, bareModel, uncachedInputCostUsd', () => {
   const { bareModel, routeTarget, uncachedInputCostUsd } = plugin
   assert.equal(bareModel('model@surplus@peer:x'), 'model')

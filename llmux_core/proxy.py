@@ -61,6 +61,11 @@ class ProxyConfig:
     similar_price_band: float = 2.0
     similar_limit: int = 3
     similar_min_samples: int = 10
+    # The card sorts client-side, so it needs a wider candidate set than the
+    # default API limits: sorting the top four speed-ranked rows by price would
+    # only reorder an already-filtered shortlist.
+    card_seller_limit: int = 8
+    card_similar_limit: int = 6
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
 
@@ -402,6 +407,7 @@ class ProxyServer:
                     "samples": offer.samples,
                     "input_per_m": offer.input_per_m,
                     "output_per_m": offer.output_per_m,
+                    "blended_per_m": round(blended_price(offer), 8),
                     "discount_pct": discount_pct,
                     "estimated_reply_seconds": round(estimated_reply_seconds, 1),
                     "cache_warning": {
@@ -515,6 +521,7 @@ class ProxyServer:
                     "peer_id": offer.peer_id,
                     "input_per_m": offer.input_per_m,
                     "output_per_m": offer.output_per_m,
+                    "blended_per_m": round(blended_price(offer), 8),
                     "tps_p50": offer.tps_p50,
                     "ttft_p50_ms": offer.ttft_p50_ms,
                     "samples": offer.samples,
@@ -572,8 +579,8 @@ class ProxyServer:
 
         return {
             "object": "list",
-            "data": self.seller_options(model),
-            "similar": self.similar_models(model),
+            "data": self.seller_options(model, limit=self.config.card_seller_limit),
+            "similar": self.similar_models(model, limit=self.config.card_similar_limit),
             "current": self.current_route(model),
         }
 
