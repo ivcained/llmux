@@ -208,18 +208,28 @@ export function routedByLlmux(provider) {
   return !value || value === 'llmux' || value.endsWith(':llmux')
 }
 
-/** Client-side "you are on a direct provider" panel data, for backends that predate `direct`. */
-export function directCurrent(model, provider) {
+/**
+ * Client-side "you are on a direct provider" panel, for gateway backends that
+ * predate `direct` (the gateway mounts plugin routes once per run, so an old
+ * route can outlive a plugin update). Prices come from the matching seller row
+ * the proxy already returned, and the display name from the planned route, so
+ * the panel is complete without a restart. Missing data stays null.
+ */
+export function directCurrent(model, provider, options = [], planned = null) {
   const label = String(provider).split(':').pop()
+  const source = label.toLowerCase()
+  const row = options.find(option => String(option?.source || '').toLowerCase() === source) || null
   return {
     model,
-    name: model,
-    source: label,
-    seller: label,
-    input_per_m: null,
-    output_per_m: null,
-    tps_p50: null,
-    ttft_p50_ms: null,
+    name: planned?.name || model,
+    source: row ? row.source : label,
+    seller: row ? row.seller || label : label,
+    input_per_m: row ? row.input_per_m : null,
+    output_per_m: row ? row.output_per_m : null,
+    tps_p50: row ? row.tps_p50 : null,
+    ttft_p50_ms: row ? row.ttft_p50_ms : null,
+    provider_id: row ? row.provider_id || null : null,
+    peer_id: row ? row.peer_id || null : null,
     pinned: true,
     direct: true,
     reason: `direct Hermes provider ${label}; LLMUX is not routing this chat`,
@@ -240,7 +250,7 @@ async function fetchOptions(model) {
   if (provider && !routedByLlmux(provider) && !current?.direct) {
     // Older backend ignored the provider and planned an LLMUX route; that would
     // name the wrong seller, so say what the chat is actually on.
-    current = directCurrent(model, provider)
+    current = directCurrent(model, provider, options, current)
   }
   let similar = Array.isArray(body?.similar) ? body.similar : null
   let similarNote = null
@@ -473,6 +483,18 @@ function SectionLabel({ children }) {
   })
 }
 
+/**
+ * Top rows for display, always including the route the chat is on: a seller
+ * without speed telemetry sinks under the default order, and hiding the
+ * current route makes every other row look like the only choice.
+ */
+export function keepCurrentVisible(sorted, current, limit) {
+  const top = sorted.slice(0, limit)
+  if (!current || top.some(option => isCurrentRoute(option, current))) return top
+  const mine = sorted.find(option => isCurrentRoute(option, current))
+  return mine ? [...top.slice(0, limit - 1), mine] : top
+}
+
 /** True when a listed offer is the route the chat is on right now. */
 export function isCurrentRoute(option, current) {
   if (!current) return false
@@ -552,7 +574,7 @@ function SwitchDialog({ onClose }) {
   const similar = Array.isArray(data.similar) ? data.similar : []
   const similarNote = typeof data.similarNote === 'string' ? data.similarNote : null
   const current = data.current || null
-  const sortedOptions = sortRows(options, sort).slice(0, MAX_OPTIONS)
+  const sortedOptions = keepCurrentVisible(sortRows(options, sort), current, MAX_OPTIONS)
   const sortedSimilar = sortRows(similar, sort).slice(0, MAX_SIMILAR)
   const optionTags = rowTags(options)
   const savings = data.savings || null

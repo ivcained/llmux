@@ -731,6 +731,32 @@ test('an old backend that ignores the provider still cannot mislabel a direct ch
   unmount()
 })
 
+test('old gateway backend: direct Solid panel still gets name and prices from the seller rows', async () => {
+  const rows = [
+    offer({ seller: 'OpenRouter', source: 'surplus', provider_id: 'openrouter', tps_p50: 1091.7, input_per_m: 0.96, output_per_m: 4.82 }),
+    offer({ seller: 'Mordiem', source: 'surplus', provider_id: 'mordiem', tps_p50: 808.4 }),
+    offer({ seller: 'Super Seeder', source: 'antseed', peer_id: 'p1', tps_p50: 198 }),
+    offer({ seller: 'Apex Ant', source: 'antseed', peer_id: 'p2', tps_p50: 164 }),
+    offer({ seller: 'Solid', source: 'solid', tps_p50: null, ttft_p50_ms: null, input_per_m: 0.38, output_per_m: 1.2 }),
+  ]
+  // Old backend: ignores ?provider= and plans a Surplus route.
+  const planned = { ...CURRENT, name: 'Claude Opus 5.5', source: 'surplus', seller: 'Surplus auto' }
+  const view = await openDialog({
+    rest: offersPayload(rows, [], planned),
+    request: async method => (method === 'model.options' ? { provider: 'solid' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByText('direct')))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('Claude Opus 5.5'), 'display name kept from the planned route')
+  assert.ok(text.includes('via Solid'), text)
+  assert.ok(text.includes('$0.38') && text.includes('$1.2'), `Solid prices shown: ${text}`)
+  // Solid has no speed data and would sort fifth; it must still be listed and marked current.
+  assert.ok(view.getAllByText('Solid').length >= 1)
+  assert.equal(view.getAllByText('Switch').length, 4)
+  assert.ok(view.getByText('current'))
+  unmount()
+})
+
 test('exported helpers: routedByLlmux', () => {
   assert.equal(plugin.routedByLlmux(null), true)
   assert.equal(plugin.routedByLlmux('llmux'), true)
