@@ -518,14 +518,41 @@ export function isCurrentRoute(option, current) {
 }
 
 /** "You are here": the model, the seller serving it, and its measured numbers. */
-function CurrentPanel({ current, base }) {
+/**
+ * Speed figures for the current-route panel. Marketplace medians win when the
+ * source publishes them; otherwise fall back to what Hermes measured on THIS
+ * chat (rolling average of the last ~10 calls), labelled as such. Hermes times
+ * whole calls, not first tokens, so that figure is shown as call time, never
+ * passed off as time-to-first-token.
+ */
+export function currentSpeed(current, usage) {
+  const marketTps = finiteNumber(current?.tps_p50)
+  const marketTtft = finiteNumber(current?.ttft_p50_ms)
+  const chatTps = finiteNumber(usage?.avg_tps)
+  const chatCall = finiteNumber(usage?.avg_latency_s)
+  const tps =
+    marketTps !== null
+      ? { value: String(marketTps), label: 'median tok/s' }
+      : chatTps !== null
+        ? { value: String(chatTps), label: 'tok/s \u00b7 this chat' }
+        : { value: 'unknown', label: 'median tok/s' }
+  const timing =
+    marketTtft !== null
+      ? { value: fmtMs(marketTtft), label: 'median first token' }
+      : chatCall !== null
+        ? { value: `${chatCall.toFixed(1)}s`, label: 'avg call \u00b7 this chat' }
+        : { value: 'unknown', label: 'median first token' }
+  return { tps, timing }
+}
+
+function CurrentPanel({ current, base, usage = null }) {
   if (!current) {
     return jsxs('div', {
       className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-[11px] text-(--ui-text-secondary)',
       children: ['Current model: ', base || 'unknown', ' (route details unavailable)'],
     })
   }
-  const tps = typeof current.tps_p50 === 'number' ? String(current.tps_p50) : 'unknown'
+  const speed = currentSpeed(current, usage)
   return jsxs('div', {
     className: 'rounded-md border border-(--ui-accent) px-3 py-2.5',
     children: [
@@ -551,8 +578,8 @@ function CurrentPanel({ current, base }) {
         children: [
           jsx(StatBlock, { value: fmtPrice(current.input_per_m), label: 'in /M tok', accent: true }),
           jsx(StatBlock, { value: fmtPrice(current.output_per_m), label: 'out /M tok', accent: true }),
-          jsx(StatBlock, { value: tps, label: 'median tok/s' }),
-          jsx(StatBlock, { value: fmtMs(current.ttft_p50_ms), label: 'median first token' }),
+          jsx(StatBlock, { value: speed.tps.value, label: speed.tps.label }),
+          jsx(StatBlock, { value: speed.timing.value, label: speed.timing.label }),
         ],
       }),
       jsx('div', {
@@ -698,7 +725,7 @@ function SwitchDialog({ onClose }) {
           }),
         ],
       }),
-      base ? jsx(CurrentPanel, { current, base }) : null,
+      base ? jsx(CurrentPanel, { current, base, usage }) : null,
       base ? jsx(SavingsPanel, { savings }) : null,
       base
         ? jsxs('div', {

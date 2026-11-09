@@ -778,6 +778,43 @@ test('exported helpers: freshnessText', () => {
   assert.equal(plugin.freshnessText({ updated_at: now / 1000 - 30, refreshing: true }, now), 'Refreshing · updated 30s ago')
 })
 
+test('direct Solid chat without market speed shows this chat\'s measured speed, labelled', async () => {
+  const solidCurrent = {
+    ...CURRENT,
+    name: 'Claude Opus 5.5',
+    source: 'solid',
+    seller: 'Solid',
+    tps_p50: null,
+    ttft_p50_ms: null,
+    input_per_m: 0.38,
+    output_per_m: 1.2,
+    direct: true,
+  }
+  const view = await openDialog({
+    rest: offersPayload([offer()], [], solidCurrent),
+    usage: { context_used: 12000, avg_tps: 61.4, avg_latency_s: 7.2 },
+  })
+  await waitFor(() => assert.ok(view.getByText('61.4')))
+  assert.ok(view.getByText('tok/s · this chat'))
+  assert.ok(view.getByText('7.2s'))
+  assert.ok(view.getByText('avg call · this chat'))
+  unmount()
+})
+
+test('exported helpers: currentSpeed prefers marketplace medians and never fakes first-token', () => {
+  const market = plugin.currentSpeed({ tps_p50: 54.3, ttft_p50_ms: 2300 }, { avg_tps: 99, avg_latency_s: 1 })
+  assert.deepEqual(market, {
+    tps: { value: '54.3', label: 'median tok/s' },
+    timing: { value: '2.3s', label: 'median first token' },
+  })
+  const none = plugin.currentSpeed({ tps_p50: null, ttft_p50_ms: null }, null)
+  assert.equal(none.tps.value, 'unknown')
+  assert.equal(none.timing.value, 'unknown')
+  const chat = plugin.currentSpeed({ tps_p50: null, ttft_p50_ms: null }, { avg_latency_s: 4 })
+  assert.equal(chat.timing.label, 'avg call · this chat')
+  assert.equal(chat.tps.value, 'unknown')
+})
+
 test('exported helpers: routedByLlmux', () => {
   assert.equal(plugin.routedByLlmux(null), true)
   assert.equal(plugin.routedByLlmux('llmux'), true)
