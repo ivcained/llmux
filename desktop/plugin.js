@@ -44,6 +44,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'llmux'
 const MAX_OPTIONS = 4
 const MAX_SIMILAR = 3
+const LIVE_REFRESH_MS = 30_000
 
 const SORTS = [
   { id: 'recommended', label: 'Recommended' },
@@ -208,7 +209,8 @@ async function fetchOptions(model) {
         'Comparable models are not served by this gateway yet. Restart Hermes to mount the newer LLMUX backend routes.'
     }
   }
-  return { options, similar, current, similarNote }
+  const savings = body?.savings && typeof body.savings === 'object' ? body.savings : null
+  return { options, similar, current, similarNote, savings }
 }
 
 async function validateRoute(model) {
@@ -270,7 +272,7 @@ function cacheLine(option, contextTokens) {
   return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens · uncached input ${fmtUsd(cost)} on this route`
 }
 
-function OfferRow({ option, contextTokens, onChoose, isCurrent = false }) {
+function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [] }) {
   const cache = option.cache_warning
   const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : 'unknown'
   return jsxs('div', {
@@ -282,6 +284,7 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false }) {
           jsx('span', { className: 'truncate text-sm font-medium', children: option.label || option.seller }),
           jsx(Badge, { variant: 'outline', children: option.source }),
           isCurrent ? jsx(Badge, { variant: 'outline', children: 'current' }) : null,
+          ...tags.map(tag => jsx(Badge, { variant: 'secondary', children: tag }, `tag:${tag}`)),
           jsxs('div', {
             className: 'ml-auto flex shrink-0 items-center gap-2',
             children: [
@@ -326,6 +329,91 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false }) {
             children: cacheLine(option, contextTokens),
           })
         : null,
+    ],
+  })
+}
+
+/** Live badges: which row leads on speed, price or first token right now. */
+export function rowTags(rows) {
+  const tags = new Map()
+  const add = (row, tag) => {
+    if (!row) return
+    const list = tags.get(row) || []
+    list.push(tag)
+    tags.set(row, list)
+  }
+  const measured = (key, pick) => {
+    let best = null
+    for (const row of rows) {
+      const value = key(row)
+      if (value === null) continue
+      if (best === null || pick(value, key(best))) best = row
+    }
+    return best
+  }
+  if (rows.length > 1) {
+    add(measured(row => finiteNumber(row.tps_p50), (a, b) => a > b), 'Fastest')
+    add(measured(row => blendedPerM(row), (a, b) => a < b), 'Cheapest')
+    add(measured(row => finiteNumber(row.ttft_p50_ms), (a, b) => a < b), 'Quickest start')
+  }
+  for (const row of rows) {
+    if (finiteNumber(row.input_per_m) === 0 && finiteNumber(row.output_per_m) === 0) add(row, 'Free')
+  }
+  return tags
+}
+
+function fmtDollars(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '$0'
+  if (Math.abs(value) >= 1) return `$${value.toFixed(2)}`
+  if (Math.abs(value) >= 0.01) return `$${value.toFixed(3)}`
+  return `$${value.toFixed(4)}`
+}
+
+/** Spend, savings and the top advice, from the local usage ledger. */
+export function SavingsPanel({ savings }) {
+  if (!savings || savings.enabled === false || !savings.summary) return null
+  const s = savings.summary
+  const insights = Array.isArray(savings.insights) ? savings.insights.slice(0, 3) : []
+  return jsxs('div', {
+    className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2.5',
+    'data-testid': 'llmux-savings',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx(SectionLabel, { children: `Your savings \u00b7 last ${s.window_days} days` }),
+          jsx('span', {
+            className: 'ml-auto text-[11px] text-(--ui-text-secondary)',
+            children: `${s.requests} replies`,
+          }),
+        ],
+      }),
+      s.requests > 0
+        ? jsxs('div', {
+            className: 'mt-2 grid grid-cols-4 gap-2',
+            children: [
+              jsx(StatBlock, { value: fmtDollars(s.spend_usd), label: 'spent' }),
+              jsx(StatBlock, { value: fmtDollars(s.savings_vs_list_usd), label: 'saved vs list', accent: true }),
+              jsx(StatBlock, { value: fmtDollars(s.savings_vs_priciest_usd), label: 'saved vs priciest', accent: true }),
+              jsx(StatBlock, { value: fmtDollars(s.cashback_usd), label: 'cashback (est.)' }),
+            ],
+          })
+        : null,
+      insights.map((insight, index) =>
+        jsxs(
+          'div',
+          {
+            className: 'mt-2 text-[11px]',
+            children: [
+              jsx('span', { className: 'font-semibold', children: insight.title }),
+              insight.detail
+                ? jsx('span', { className: 'text-(--ui-text-secondary)', children: ` \u00b7 ${insight.detail}` })
+                : null,
+            ],
+          },
+          `${insight.kind}:${index}`,
+        ),
+      ),
     ],
   })
 }
@@ -402,6 +490,8 @@ function SwitchDialog({ onClose }) {
     queryKey: ['llmux', 'seller-options', base],
     queryFn: () => fetchOptions(base),
     enabled: Boolean(base),
+    // Live pricing: marketplace prices and speeds move with seller liquidity.
+    refetchInterval: LIVE_REFRESH_MS,
   })
   const data = query.data || {}
   // No slice here: the proxy serves a wider candidate set so a price sort can
@@ -412,6 +502,8 @@ function SwitchDialog({ onClose }) {
   const current = data.current || null
   const sortedOptions = sortRows(options, sort).slice(0, MAX_OPTIONS)
   const sortedSimilar = sortRows(similar, sort).slice(0, MAX_SIMILAR)
+  const optionTags = rowTags(options)
+  const savings = data.savings || null
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
 
   function notifyPinned(option) {
@@ -515,6 +607,7 @@ function SwitchDialog({ onClose }) {
         ],
       }),
       base ? jsx(CurrentPanel, { current, base }) : null,
+      base ? jsx(SavingsPanel, { savings }) : null,
       base
         ? jsxs('div', {
             className: 'flex flex-wrap items-center gap-1',
@@ -581,6 +674,7 @@ function SwitchDialog({ onClose }) {
                             option,
                             contextTokens,
                             isCurrent: isCurrentRoute(option, current),
+                            tags: optionTags.get(option) || [],
                             onChoose: option => setSelected({ option, binding: captureBinding() }),
                           },
                           `${option.source}:${option.provider_id || option.peer_id || option.seller}`,

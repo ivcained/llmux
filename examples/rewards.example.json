@@ -1,0 +1,15 @@
+{
+  "surplus": {
+    "cashback_pct": 0,
+    "note": "Surplus discounts are already in its per-token prices; no separate cashback.",
+    "confirmed": true
+  },
+  "solid": {
+    "cashback_pct": 50,
+    "models": [],
+    "monthly_cap_usd": null,
+    "free_models": ["deepseek-v4.1-flash"],
+    "note": "Solid AI API rewards. Copy the exact terms from your Solid dashboard before setting confirmed to true.",
+    "confirmed": false
+  }
+}

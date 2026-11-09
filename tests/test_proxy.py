@@ -1,4 +1,5 @@
 import json
+import tempfile
 import threading
 import time
 import unittest
@@ -7,7 +8,11 @@ import urllib.request
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from pathlib import Path
+
 from llmux_core.catalog import Catalog
+from llmux_core.ledger import Ledger
+from llmux_core.rewards import parse_policies
 from llmux_core.models import ModelRecord, Offer
 from llmux_core.proxy import ProxyConfig, ProxyServer
 
@@ -76,6 +81,23 @@ class MockUpstream:
                     self.end_headers()
                     self.wfile.write(payload)
                     return
+                if upstream.mode == "usage_sse":
+                    # include_usage shape: content chunks, then a usage-only chunk.
+                    # Split mid-line across writes to exercise the scanner's buffer.
+                    parts = [
+                        b'data: {"choices":[{"delta":{"content":"hel',
+                        b'lo"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":1000,',
+                        b'"completion_tokens":500}}\n\ndata: [DONE]\n\n',
+                    ]
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.send_header("transfer-encoding", "chunked")
+                    self.end_headers()
+                    for part in parts:
+                        self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+                    return
                 if upstream.mode in {"sse", "partial"}:
                     done = b"data: [DONE]\n\n" if upstream.mode == "sse" else b""
                     payload = (
@@ -107,6 +129,8 @@ class MockUpstream:
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.send_header("x-request-id", f"{upstream.source}-request")
+                if upstream.mode == "charged":
+                    self.send_header("x-si-buyer-cost-micro", "42")
                 self.send_header("content-length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -219,8 +243,15 @@ class ProxyCase(unittest.TestCase):
                 "antseed": FakeAdapter("antseed", self.antseed.base_url, self.antseed_records),
             },
             config=self.config,
+            ledger=self.make_ledger(),
+            rewards=self.rewards,
         )
         self.port = self.proxy.start(port=0)
+
+    rewards = None
+
+    def make_ledger(self):
+        return None
 
     def tearDown(self):
         self.proxy.stop()
@@ -608,7 +639,7 @@ class CurrentRouteTests(ProxyCase):
 
     def test_payload_carries_sellers_similar_and_current(self):
         payload = self.proxy.seller_options_payload("kimi-k3.1-pro")
-        self.assertEqual(sorted(payload), ["current", "data", "object", "similar"])
+        self.assertEqual(sorted(payload), ["current", "data", "object", "savings", "similar"])
         current = payload["current"]
         assert current is not None
         self.assertEqual(current["model"], "kimi-k3.1-pro")
@@ -762,6 +793,134 @@ class SurplusProviderDetailTests(ProxyCase):
         row = next(o for o in options if o["provider_id"] == "too-good")
         self.assertEqual(row["discount_pct"], 99)
 
+
+
+class LedgerCase(ProxyCase):
+    """Proxy with a temp-file ledger; nothing touches the real home directory."""
+
+    def make_ledger(self):
+        self._ledger_dir = tempfile.TemporaryDirectory()
+        return Ledger(Path(self._ledger_dir.name) / "usage.jsonl")
+
+    def tearDown(self):
+        super().tearDown()
+        self._ledger_dir.cleanup()
+
+    def rows(self, expect=None):
+        # The ledger row is written in the handler's finally block, after the
+        # last byte reaches the client, so a fast client can look too early.
+        deadline = time.monotonic() + 2.0
+        rows = self.proxy.ledger.entries()
+        while expect is not None and len(rows) < expect and time.monotonic() < deadline:
+            time.sleep(0.02)
+            rows = self.proxy.ledger.entries()
+        return rows
+
+
+class UsageTrackingJsonTests(LedgerCase):
+    config = ProxyConfig(policy="cheapest")
+
+    def test_json_reply_is_recorded_with_estimated_cost_and_savings(self):
+        status, _, _ = self.completions()
+        self.assertEqual(status, 200)
+        rows = self.rows(expect=1)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["model"], "kimi-k3.1-pro")
+        self.assertEqual(row["source"], "antseed")  # cheapest route
+        self.assertEqual((row["prompt_tokens"], row["completion_tokens"]), (3, 2))
+        self.assertTrue(row["usage_reported"])
+        self.assertFalse(row["cost_authoritative"])
+        # 3 in at 0.12 + 2 out at 0.585 per M
+        self.assertAlmostEqual(row["actual_usd"], (3 * 0.12 + 2 * 0.585) / 1e6, places=12)
+        # list: 3 at 2.0 + 2 at 10.0 per M
+        self.assertAlmostEqual(row["list_cost_usd"], (3 * 2.0 + 2 * 10.0) / 1e6, places=12)
+        self.assertGreater(row["savings_vs_list_usd"], 0)
+        self.assertNotIn("messages", row)
+
+    def test_savings_endpoint_and_card_payload_carry_the_summary(self):
+        self.completions()
+        self.completions()
+        _, _, body = self.request_json("/llmux/savings?days=7")
+        self.assertTrue(body["enabled"])
+        self.assertEqual(body["summary"]["requests"], 2)
+        self.assertEqual(body["summary"]["window_days"], 7.0)
+        self.assertIsInstance(body["insights"], list)
+        payload = self.proxy.seller_options_payload("kimi-k3.1-pro")
+        self.assertEqual(payload["savings"]["summary"]["requests"], 2)
+
+
+class UsageTrackingChargedTests(LedgerCase):
+    surplus_mode = "charged"
+    config = ProxyConfig(policy="cheapest")
+    surplus_cheap = True
+
+    def test_marketplace_reported_charge_wins(self):
+        self.completions()
+        row = self.rows(expect=1)[0]
+        self.assertEqual(row["source"], "surplus")
+        self.assertTrue(row["cost_authoritative"])
+        self.assertAlmostEqual(row["actual_usd"], 0.000042, places=9)
+
+
+class UsageTrackingStreamTests(LedgerCase):
+    surplus_mode = "usage_sse"
+    surplus_cheap = True
+    config = ProxyConfig(policy="cheapest")
+    rewards = parse_policies({"surplus": {"cashback_pct": 50, "confirmed": False}})
+
+    def test_stream_usage_is_scanned_from_the_final_event(self):
+        _, _, raw = self.completions_raw()
+        self.assertIn("hello", raw)
+        row = self.rows(expect=1)[0]
+        self.assertTrue(row["stream"])
+        self.assertEqual((row["prompt_tokens"], row["completion_tokens"]), (1000, 500))
+        expected = (1000 * 0.01 + 500 * 0.02) / 1e6
+        self.assertAlmostEqual(row["actual_usd"], expected, places=12)
+        self.assertAlmostEqual(row["cashback_usd"], expected / 2, places=12)
+        self.assertFalse(row["cashback_confirmed"])
+
+
+class UsageTrackingStreamWithoutUsageTests(LedgerCase):
+    surplus_mode = "sse"
+    surplus_cheap = True
+    config = ProxyConfig(policy="cheapest")
+
+    def test_stream_without_usage_records_nulls_not_zeros(self):
+        self.completions_raw()
+        row = self.rows(expect=1)[0]
+        self.assertFalse(row["usage_reported"])
+        self.assertIsNone(row["actual_usd"])
+        self.assertIsNone(row["completion_tokens"])
+
+
+class UsageTrackingFailureTests(LedgerCase):
+    surplus_mode = "fail"
+    antseed_mode = "fail"
+
+    def test_failed_requests_are_not_recorded_as_spend(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.completions()
+        caught.exception.close()
+        self.assertEqual(caught.exception.code, 503)
+        self.assertEqual(self.rows(), [])
+
+    def test_both_sources_failing_returns_instead_of_looping(self):
+        # Regression: failover used to bounce surplus -> antseed -> surplus forever.
+        started = time.monotonic()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.completions()
+        caught.exception.close()
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(len(self.surplus.requests), 1)
+        self.assertEqual(len(self.antseed.requests), 1)
+
+
+class NoLedgerTests(ProxyCase):
+    def test_savings_disabled_without_a_ledger(self):
+        self.completions()
+        _, _, body = self.request_json("/llmux/savings")
+        self.assertEqual(body, {"enabled": False, "summary": None, "insights": []})
 
 if __name__ == "__main__":
     unittest.main()

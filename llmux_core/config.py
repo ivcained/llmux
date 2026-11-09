@@ -24,6 +24,7 @@ class Settings:
     catalog_ttl_seconds: float = 60.0
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
+    track_usage: bool = True
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -65,4 +66,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         antseed_min_reputation=min_reputation,
         catalog_ttl_seconds=catalog_ttl,
         upstream_timeout_seconds=timeout,
+        track_usage=(values.get("LLMUX_TRACK_USAGE") or "1").strip() != "0",
     )

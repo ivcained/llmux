@@ -56,6 +56,19 @@ Endpoints:
 - `POST /v1/chat/completions` routes one request and passes JSON or SSE through.
 - `GET /llmux/seller-options?model=<id>` returns up to four ranked seller offers with TTFT, TPS, estimated reply time, price, discount versus the model's list price, and a cache-cost warning.
 
+- `GET /llmux/savings?days=30` returns spend, savings and ranked advice from the local usage ledger (also embedded in `/seller-options` as `savings`).
+
+## Usage, savings and rewards
+
+Every completed reply appends one row to `~/.hermes/llmux/usage.jsonl`: model, source, seller, token counts, cost, what the same tokens would have cost at list price and on the cheapest and priciest live offer, and any estimated cashback. The card shows the 30-day totals and up to three ranked tips.
+
+- **Your keys stay where they are.** LLMUX reads `SURPLUS_API_KEY` from the gateway environment (Hermes keeps it in `~/.hermes/.env`) and sends it only to Surplus. The ledger never stores keys, prompts or completions; only token counts and dollar figures.
+- **Honest costs.** When Surplus reports what it charged (`x-si-buyer-cost-micro`), that figure is used and marked authoritative. Otherwise cost is estimated from published per-token prices. A reply with no usage block is recorded with nulls, not zeros, and the card warns when coverage drops below 80%.
+- **Streaming is covered.** Hermes requests `stream_options.include_usage`, so the final SSE event carries token counts; LLMUX reads it without buffering the reply.
+- **Turn it off** with `LLMUX_TRACK_USAGE=0`. Delete the file at any time to reset.
+
+Cashback and free-model programs change often, so LLMUX ships with none hard-coded. Describe the ones you have in `~/.hermes/llmux/rewards.json` (or point `LLMUX_REWARDS_JSON` at another file); see `examples/rewards.example.json`. Terms are treated as estimates unless you mark them `"confirmed": true`, and the card labels them accordingly.
+
 Model ids accept routing directives:
 
 ```text

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from .adapters import AntseedAdapter, SurplusAdapter
 from .config import Settings
+from .ledger import Ledger
 from .proxy import ProxyConfig, ProxyServer
+from .rewards import load_table
 
 
 def build_proxy(settings: Settings) -> ProxyServer:
@@ -28,4 +30,6 @@ def build_proxy(settings: Settings) -> ProxyServer:
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             allow_remote=settings.allow_remote,
         ),
+        ledger=Ledger() if settings.track_usage else None,
+        rewards=load_table(),
     )

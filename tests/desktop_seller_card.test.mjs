@@ -120,9 +120,9 @@ function offer(overrides = {}) {
   return { ...OFFER, ...overrides }
 }
 
-function offersPayload(rows, similar = [], current = null) {
+function offersPayload(rows, similar = [], current = null, savings = undefined) {
   return async path => {
-    if (path.startsWith('/seller-options')) return { data: rows, similar, current }
+    if (path.startsWith('/seller-options')) return { data: rows, similar, current, savings }
     if (path.startsWith('/similar-models')) return { data: similar }
     if (path === '/validate-route') return { ok: true, plan: { model: 'planned' } }
     throw new Error(`unexpected rest path: ${path}`)
@@ -628,6 +628,50 @@ test('sorting also applies to the similar models section', async () => {
   fireEvent.click(view.getByText('Price'))
   text = view.getByTestId('dialog').textContent
   assert.ok(text.indexOf('Model B') < text.indexOf('Model A'), 'cheapest similar model first')
+  unmount()
+})
+
+test('live tags mark the fastest, cheapest, quickest-start and free rows', async () => {
+  const rows = [
+    offer({ seller: 'Speedy', tps_p50: 120, ttft_p50_ms: 900, input_per_m: 1, output_per_m: 4, blended_per_m: 1.6 }),
+    offer({ seller: 'Thrifty', tps_p50: 30, ttft_p50_ms: 400, input_per_m: 0, output_per_m: 0, blended_per_m: 0 }),
+  ]
+  const view = await openDialog({ rest: offersPayload(rows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 2))
+  for (const tag of ['Fastest', 'Cheapest', 'Quickest start', 'Free']) {
+    assert.ok(view.getByText(tag), `tag rendered: ${tag}`)
+  }
+  unmount()
+})
+
+test('savings panel shows spend, savings and the top insight from the ledger', async () => {
+  const savings = {
+    enabled: true,
+    summary: {
+      window_days: 30,
+      requests: 42,
+      spend_usd: 1.25,
+      savings_vs_list_usd: 9.5,
+      savings_vs_priciest_usd: 2.1,
+      cashback_usd: 0.4,
+    },
+    insights: [
+      { kind: 'cheaper_route', title: '$0.300 more than the cheapest seller', detail: 'Switch the policy to Cheapest.', usd: 0.3 },
+    ],
+  }
+  const view = await openDialog({ rest: offersPayload([offer()], [], null, savings) })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-savings')))
+  const text = view.getByTestId('llmux-savings').textContent
+  for (const fragment of ['42 replies', '$1.25', '$9.50', '$2.10', '$0.400', 'saved vs list', '$0.300 more than the cheapest seller']) {
+    assert.ok(text.includes(fragment), `savings panel shows ${fragment}: ${text}`)
+  }
+  unmount()
+})
+
+test('savings panel hides when tracking is disabled or absent', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()], [], null, { enabled: false, summary: null, insights: [] }) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  assert.equal(view.queryByTestId('llmux-savings'), null)
   unmount()
 })
 

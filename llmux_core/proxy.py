@@ -14,6 +14,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .catalog import Catalog
+from .insights import build_insights
+from .ledger import Ledger, compute_costs, extract_usage
+from .rewards import RewardTable
 from .models import ModelDirective, ModelRecord, Offer, RouteDecision
 from .routing import NoRouteError, blended_price, choose_offer, parse_model_directive
 
@@ -26,12 +29,49 @@ STREAM_CHUNK_SIZE = 8192
 MAX_PLAUSIBLE_TPS = 2000.0
 
 
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def plausible_tps(value: float | None) -> float | None:
     """Measured TPS, or None when the figure is not a credible generation rate."""
 
     if value is None:
         return None
     return value if value <= MAX_PLAUSIBLE_TPS else None
+
+
+class _UsageScanner:
+    """Picks the usage block out of an SSE stream without buffering the reply.
+
+    OpenAI-style streams with ``stream_options.include_usage`` put token counts
+    in the final data event. Only the trailing partial line is kept between
+    chunks, so memory stays bounded however long the reply runs.
+    """
+
+    MAX_PENDING = 65536
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self.usage: dict[str, Any] = extract_usage(None)
+
+    def feed(self, chunk: bytes) -> None:
+        data = self._pending + chunk
+        lines = data.split(b"\n")
+        self._pending = lines.pop()[-self.MAX_PENDING :]
+        for line in lines:
+            self._line(line.strip())
+
+    def _line(self, line: bytes) -> None:
+        if not line.startswith(b"data:") or b'"usage"' not in line:
+            return
+        payload = line[5:].strip()
+        try:
+            found = extract_usage(json.loads(payload))
+        except ValueError:
+            return
+        if found.get("completion_tokens") is not None or found.get("prompt_tokens") is not None:
+            self.usage = found
 
 
 class UpstreamError(Exception):
@@ -73,9 +113,20 @@ class ProxyConfig:
 class ProxyServer:
     """HTTP proxy that routes OpenAI chat requests across marketplace adapters."""
 
-    def __init__(self, adapters: dict[str, Any], config: ProxyConfig | None = None) -> None:
+    def __init__(
+        self,
+        adapters: dict[str, Any],
+        config: ProxyConfig | None = None,
+        *,
+        ledger: Ledger | None = None,
+        rewards: RewardTable | None = None,
+    ) -> None:
         self.adapters = adapters
         self.config = config or ProxyConfig()
+        # Usage tracking is opt-in at construction: the composition root passes
+        # a ledger, tests and embedders that pass none write nothing to disk.
+        self.ledger = ledger
+        self.rewards = rewards or RewardTable()
         self._catalog: Catalog | None = None
         self._catalog_time = 0.0
         self._catalog_lock = threading.Lock()
@@ -208,12 +259,20 @@ class ProxyServer:
         )
 
     def _alternate(
-        self, record: ModelRecord, decision: RouteDecision, policy: str
+        self,
+        record: ModelRecord,
+        decision: RouteDecision,
+        policy: str,
+        tried: set[str] | None = None,
     ) -> RouteDecision | None:
+        # Exclude every source already attempted, not just the current one:
+        # with two sources both failing, excluding only the current source
+        # bounces between them forever.
+        excluded = {decision.offer.source} | (tried or set())
         candidates = tuple(
             offer
             for offer in record.offers
-            if offer.source != decision.offer.source
+            if offer.source not in excluded
         )
         if not candidates:
             return None
@@ -582,6 +641,99 @@ class ProxyServer:
             "data": self.seller_options(model, limit=self.config.card_seller_limit),
             "similar": self.similar_models(model, limit=self.config.card_similar_limit),
             "current": self.current_route(model),
+            "savings": self.savings_payload(),
+        }
+
+    def record_usage(
+        self,
+        *,
+        record: ModelRecord | None,
+        decision: RouteDecision,
+        usage: dict[str, Any],
+        charged_micro: str | None,
+        stream: bool,
+        status: int,
+        failover_from: str | None,
+    ) -> dict[str, Any] | None:
+        """Append one ledger row for a completed reply. Never raises."""
+
+        if self.ledger is None:
+            return None
+        try:
+            offer = decision.offer
+            metadata = record.metadata if record is not None else {}
+            alternatives = []
+            if record is not None:
+                alternatives = [
+                    (alt.input_per_m, alt.output_per_m)
+                    for alt in record.offers
+                    if alt.healthy
+                ]
+                alternatives += [
+                    (alt.input_per_m, alt.output_per_m)
+                    for alt in self._surplus_detail_offers(offer.upstream_model)
+                ] if offer.source == "surplus" else []
+            costs = compute_costs(
+                usage=usage,
+                input_per_m=offer.input_per_m,
+                output_per_m=offer.output_per_m,
+                cached_input_per_m=offer.cached_input_per_m,
+                charged_micro_header=charged_micro,
+                list_input_per_m=_number(metadata.get("list_input_per_m")),
+                list_output_per_m=_number(metadata.get("list_output_per_m")),
+                alternative_offers=alternatives,
+            )
+            policy = self.rewards.for_source(offer.source)
+            model = record.id if record is not None else decision.requested_model
+            cashback = policy.cashback_for(model, costs.actual_usd) if policy else None
+            return self.ledger.record(
+                {
+                    "model": model,
+                    "source": offer.source,
+                    "seller": offer.seller or offer.source,
+                    "provider_id": offer.provider_id,
+                    "policy": decision.applied_policy,
+                    "stream": stream,
+                    "status": status,
+                    "failover_from": failover_from,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "cached_tokens": usage.get("cached_tokens"),
+                    "usage_reported": usage.get("completion_tokens") is not None,
+                    "actual_usd": costs.actual_usd,
+                    "cost_authoritative": costs.authoritative,
+                    "list_cost_usd": costs.list_usd,
+                    "cheapest_cost_usd": costs.cheapest_usd,
+                    "priciest_cost_usd": costs.priciest_usd,
+                    "savings_vs_list_usd": costs.savings_vs_list,
+                    "cashback_usd": cashback,
+                    "cashback_confirmed": bool(policy and policy.confirmed),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - tracking must never break a reply
+            LOGGER.warning("usage ledger write failed: %s", exc)
+            return None
+
+    def savings_payload(self, *, days: float = 30.0) -> dict[str, Any]:
+        """Spend, savings and ranked advice for the card and the API."""
+
+        if self.ledger is None:
+            return {"enabled": False, "summary": None, "insights": []}
+        summary = self.ledger.summary(days=days)
+        free_live: list[str] = []
+        try:
+            free_live = [
+                rec.id
+                for rec in self._get_catalog().records
+                if any(o.healthy and o.input_per_m == 0 and o.output_per_m == 0 for o in rec.offers)
+            ][:3]
+        except Exception:  # noqa: BLE001 - advice without the catalog is still advice
+            free_live = []
+        return {
+            "enabled": True,
+            "summary": summary,
+            "insights": build_insights(summary, rewards=self.rewards, free_models_live=free_live),
+            "ledger_path": str(self.ledger.path),
         }
 
     def plan_route(self, body: dict) -> dict:
@@ -684,6 +836,14 @@ class ProxyServer:
                         model = parse_qs(raw_query).get("model", [""])[0]
                         self._json(200, proxy.seller_options_payload(model))
                         return
+                    if path == "/llmux/savings":
+                        raw_days = parse_qs(urlsplit(self.path).query).get("days", ["30"])[0]
+                        try:
+                            days = max(0.01, min(365.0, float(raw_days)))
+                        except ValueError:
+                            days = 30.0
+                        self._json(200, proxy.savings_payload(days=days))
+                        return
                     if path == "/llmux/similar-models":
                         raw_query = urlsplit(self.path).query
                         model = parse_qs(raw_query).get("model", [""])[0]
@@ -731,6 +891,7 @@ class ProxyServer:
                 stream = bool(body.get("stream"))
                 record = proxy._get_catalog().get(directive.model)
                 failover_from = None
+                tried: set[str] = set()
                 while True:
                     adapter = proxy.adapters[decision.offer.source]
                     try:
@@ -747,8 +908,9 @@ class ProxyServer:
                             self.end_headers()
                             self.wfile.write(exc.body)
                             return
+                        tried.add(decision.offer.source)
                         alternate = (
-                            proxy._alternate(record, decision, decision.policy)
+                            proxy._alternate(record, decision, decision.policy, tried)
                             if exc.retryable and can_failover and record is not None
                             else None
                         )
@@ -776,14 +938,25 @@ class ProxyServer:
                 }
                 if failover_from:
                     receipt["X-LLMUX-Failover"] = failover_from
+                usage: dict[str, Any] = {}
                 try:
                     if stream:
-                        self._relay_stream(response, receipt)
+                        usage = self._relay_stream(response, receipt)
                     else:
-                        self._relay_json(response, receipt)
+                        usage = self._relay_json(response, receipt)
                 finally:
                     response.close()
                     connection.close()
+                    if response.status < 400:
+                        proxy.record_usage(
+                            record=record,
+                            decision=decision,
+                            usage=usage or extract_usage(None),
+                            charged_micro=response.getheader("x-si-buyer-cost-micro"),
+                            stream=stream,
+                            status=response.status,
+                            failover_from=failover_from,
+                        )
 
             def _relay_json(self, response, receipt):
                 data = response.read()
@@ -799,6 +972,10 @@ class ProxyServer:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+                try:
+                    return extract_usage(json.loads(data))
+                except ValueError:
+                    return extract_usage(None)
 
             def _relay_stream(self, response, receipt):
                 self.send_response(response.status)
@@ -812,14 +989,17 @@ class ProxyServer:
                     self.send_header(name, value)
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                scanner = _UsageScanner()
                 while True:
                     chunk = response.read1(STREAM_CHUNK_SIZE)
                     if not chunk:
                         break
+                    scanner.feed(chunk)
                     self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
+                return scanner.usage
 
         self._server = ThreadingHTTPServer((host, port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
