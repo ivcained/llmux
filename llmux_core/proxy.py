@@ -673,11 +673,13 @@ class ProxyServer:
                 if discount_pct >= 100 and blended_price(offer) > 0:
                     # A non-zero price is never 100% off; keep the badge honest.
                     discount_pct = 99
-            ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
             row_tps = plausible_tps(offer.tps_p50)
-            estimated_reply_seconds = (
-                ttft_s + 1000.0 / row_tps if row_tps else ttft_s
-            )
+            # No measurement means no estimate: 0s would read as "instant".
+            if row_tps is None and offer.ttft_p50_ms is None:
+                estimated_reply_seconds = None
+            else:
+                ttft_s = (offer.ttft_p50_ms or 0) / 1000.0
+                estimated_reply_seconds = ttft_s + 1000.0 / row_tps if row_tps else ttft_s
             result.append(
                 {
                     "source": offer.source,
@@ -692,7 +694,14 @@ class ProxyServer:
                     "output_per_m": offer.output_per_m,
                     "blended_per_m": round(blended_price(offer), 8),
                     "discount_pct": discount_pct,
-                    "estimated_reply_seconds": round(estimated_reply_seconds, 1),
+                    "estimated_reply_seconds": (
+                        round(estimated_reply_seconds, 1)
+                        if estimated_reply_seconds is not None
+                        else None
+                    ),
+                    # False when the source never publishes speed (Solid), as
+                    # opposed to a measured source lacking data for this seller.
+                    "speed_published": offer.source not in UNMEASURED_SOURCES,
                     "cache_warning": {
                         "text": (
                             "The next request sends the current conversation context to the "
@@ -857,6 +866,7 @@ class ProxyServer:
             "reason": f"direct Hermes provider {label}; LLMUX is not routing this chat",
             "pinned": True,
             "direct": True,
+            "speed_published": source not in UNMEASURED_SOURCES,
         }
 
     def _planned_route(self, model: str) -> dict | None:
@@ -892,6 +902,7 @@ class ProxyServer:
             "reason": decision.reason,
             "pinned": bool(directive.source or directive.peer_id or directive.provider_id),
             "direct": False,
+            "speed_published": offer.source not in UNMEASURED_SOURCES,
         }
 
     def seller_options_payload(self, model: str, provider: str | None = None) -> dict:

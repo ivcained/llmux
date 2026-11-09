@@ -177,8 +177,23 @@ function fmtUsd(value) {
   return value < 0.001 ? `$${value.toFixed(5)}` : `$${value.toFixed(4)}`
 }
 
-function fmtMs(ms) {
-  if (typeof ms !== 'number' || Number.isNaN(ms)) return 'unknown'
+// Sources that sell at a fixed price and never publish speed figures. Mirrors
+// the proxy's UNMEASURED_SOURCES for backends that predate `speed_published`.
+const UNPUBLISHED_SPEED_SOURCES = new Set(['solid'])
+
+/** False when the row's source never publishes speed (vs. simply lacking data). */
+export function speedPublished(row) {
+  if (typeof row?.speed_published === 'boolean') return row.speed_published
+  return !UNPUBLISHED_SPEED_SOURCES.has(String(row?.source || '').toLowerCase())
+}
+
+/** Placeholder for a missing speed figure: why it is missing, in plain words. */
+function missingSpeed(row) {
+  return speedPublished(row) ? 'unknown' : 'not published'
+}
+
+function fmtMs(ms, missing = 'unknown') {
+  if (typeof ms !== 'number' || Number.isNaN(ms)) return missing
   return `${(ms / 1000).toFixed(1)}s`
 }
 
@@ -317,7 +332,10 @@ function metaLine(option) {
   const reply =
     typeof option.estimated_reply_seconds === 'number'
       ? `~${option.estimated_reply_seconds}s estimated for 1000 output tokens`
-      : 'reply estimate unknown'
+      : speedPublished(option)
+        ? 'reply estimate unknown'
+        : `speed not published by ${option.seller || option.source}`
+  if (!speedPublished(option)) return reply
   const samples = typeof option.samples === 'number' ? `${option.samples} samples` : 'samples unknown'
   return `${reply} · ${samples}`
 }
@@ -335,7 +353,7 @@ function cacheLine(option, contextTokens) {
 
 function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [] }) {
   const cache = option.cache_warning
-  const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : 'unknown'
+  const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : missingSpeed(option)
   return jsxs('div', {
     className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2.5',
     children: [
@@ -371,7 +389,7 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
           jsx(StatBlock, { value: fmtPrice(option.input_per_m), label: 'in /M tok', accent: true }),
           jsx(StatBlock, { value: fmtPrice(option.output_per_m), label: 'out /M tok', accent: true }),
           jsx(StatBlock, { value: tps, label: 'median tok/s' }),
-          jsx(StatBlock, { value: fmtMs(option.ttft_p50_ms), label: 'median first token' }),
+          jsx(StatBlock, { value: fmtMs(option.ttft_p50_ms, missingSpeed(option)), label: 'median first token' }),
         ],
       }),
       jsx('div', {
@@ -535,13 +553,13 @@ export function currentSpeed(current, usage) {
       ? { value: String(marketTps), label: 'median tok/s' }
       : chatTps !== null
         ? { value: String(chatTps), label: 'tok/s \u00b7 this chat' }
-        : { value: 'unknown', label: 'median tok/s' }
+        : { value: missingSpeed(current), label: 'median tok/s' }
   const timing =
     marketTtft !== null
       ? { value: fmtMs(marketTtft), label: 'median first token' }
       : chatCall !== null
         ? { value: `${chatCall.toFixed(1)}s`, label: 'avg call \u00b7 this chat' }
-        : { value: 'unknown', label: 'median first token' }
+        : { value: missingSpeed(current), label: 'median first token' }
   return { tps, timing }
 }
 

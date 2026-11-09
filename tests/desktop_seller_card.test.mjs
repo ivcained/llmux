@@ -807,12 +807,35 @@ test('exported helpers: currentSpeed prefers marketplace medians and never fakes
     tps: { value: '54.3', label: 'median tok/s' },
     timing: { value: '2.3s', label: 'median first token' },
   })
-  const none = plugin.currentSpeed({ tps_p50: null, ttft_p50_ms: null }, null)
+  const none = plugin.currentSpeed({ source: 'surplus', tps_p50: null, ttft_p50_ms: null }, null)
   assert.equal(none.tps.value, 'unknown')
   assert.equal(none.timing.value, 'unknown')
+  const solid = plugin.currentSpeed({ source: 'solid', tps_p50: null, ttft_p50_ms: null }, null)
+  assert.equal(solid.tps.value, 'not published')
+  assert.equal(solid.timing.value, 'not published')
   const chat = plugin.currentSpeed({ tps_p50: null, ttft_p50_ms: null }, { avg_latency_s: 4 })
   assert.equal(chat.timing.label, 'avg call · this chat')
   assert.equal(chat.tps.value, 'unknown')
+})
+
+test('a Solid seller row says "not published", never "unknown" or a 0s estimate', async () => {
+  const rows = [
+    offer({ seller: 'Solid', source: 'solid', tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, speed_published: false, samples: 0 }),
+  ]
+  const view = await openDialog({ rest: offersPayload(rows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const text = view.getByTestId('dialog').textContent
+  assert.equal(view.getAllByText('not published').length, 2)
+  assert.ok(text.includes('speed not published by Solid'), text)
+  assert.ok(!text.includes('0 samples'), text)
+  assert.ok(!/~0s/.test(text), text)
+  unmount()
+})
+
+test('exported helpers: speedPublished falls back to the source on old backends', () => {
+  assert.equal(plugin.speedPublished({ source: 'solid' }), false)
+  assert.equal(plugin.speedPublished({ source: 'surplus' }), true)
+  assert.equal(plugin.speedPublished({ source: 'solid', speed_published: true }), true)
 })
 
 test('exported helpers: routedByLlmux', () => {

@@ -103,6 +103,14 @@ class CurrentRouteProviderTests(unittest.TestCase):
         rows = self.proxy.seller_options("kimi-k3")
         self.assertEqual([r["source"] for r in rows], ["solid"])
         self.assertIsNone(rows[0]["tps_p50"])
+        # No measurement means no estimate, not a 0s "instant" reply.
+        self.assertIsNone(rows[0]["estimated_reply_seconds"])
+        self.assertFalse(rows[0]["speed_published"])
+
+    def test_current_route_flags_unpublished_speed(self):
+        current = self.proxy.current_route("kimi-k3", "solid")
+        assert current is not None
+        self.assertFalse(current["speed_published"])
 
     def test_payload_passes_provider_through(self):
         payload = self.proxy.seller_options_payload("kimi-k3", "solid")
