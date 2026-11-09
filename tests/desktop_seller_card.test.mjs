@@ -230,6 +230,7 @@ test('renders at most four offers with median labels and a 1000-output-token est
   assert.ok(text.includes('0.4s'), 'TTFT value rendered big')
   assert.ok(text.includes('55'), 'TPS value rendered big')
   assert.ok(text.includes('~18.6s estimated for 1000 output tokens'), 'estimate names 1000 output tokens')
+  assert.ok(!text.includes('reply estimate unknown'), 'never says unknown when the inputs are printed right above')
   assert.ok(text.includes('$0.5'), 'input price rendered as a stat')
   assert.ok(text.includes('$1.5'), 'output price rendered as a stat')
   assert.ok(text.includes('in /M tok'), 'input unit labelled')
@@ -260,7 +261,7 @@ test('cache warning uses live focusedUsage context_used and the route price', as
   await waitFor(() => assert.ok(view.getAllByText('Switch').length === 1))
   const text = view.getByTestId('dialog').textContent
   assert.ok(text.includes('12,345 context tokens'), 'context token count from focusedUsage')
-  assert.ok(text.includes('uncached input $0.0062'), 'cost = 12345 * $0.5/1M on this route')
+  assert.ok(text.includes('next input \u2248 $0.0062'), 'cost = 12345 * $0.5/1M, labelled as a cost')
   unmount()
 })
 
@@ -836,6 +837,96 @@ test('exported helpers: speedPublished falls back to the source on old backends'
   assert.equal(plugin.speedPublished({ source: 'solid' }), false)
   assert.equal(plugin.speedPublished({ source: 'surplus' }), true)
   assert.equal(plugin.speedPublished({ source: 'solid', speed_published: true }), true)
+})
+
+test('persona findings: derived estimates, list price, vs-current, decimals, friendly errors', async () => {
+  // 1. Similar-model rows arrive WITHOUT estimated_reply_seconds but WITH
+  // tps + ttft: the card must derive the estimate, not print "unknown".
+  const similarRow = {
+    model: 'haiku',
+    name: 'Claude Haiku 4.5',
+    source: 'surplus',
+    seller: 'Surplus auto',
+    tps_p50: 100,
+    ttft_p50_ms: 1000,
+    input_per_m: 0.05,
+    output_per_m: 0.25,
+    discount_pct: 50,
+    samples: 10,
+    price_ratio: 0.5,
+    price_basis: 'list',
+    switch_model: 'haiku',
+  }
+  const current = {
+    ...CURRENT,
+    provider_id: 'someone-else',
+    output_per_m: 0.5,
+    input_per_m: 0.5,
+  }
+  const view = await openDialog({
+    rest: async path => {
+      if (path.startsWith('/seller-options')) {
+        return { data: [offer()], similar: [similarRow], current, savings: undefined }
+      }
+      throw new Error(`unexpected rest path: ${path}`)
+    },
+  })
+  await waitFor(() => assert.ok(view.getAllByText('Switch').length >= 1))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('~11.0s estimated for 1000 output tokens'), 'derived from ttft 1s + 1000/100 tok/s')
+  assert.ok(!text.includes('reply estimate unknown'))
+  // 2. "N% off list" shows the list price it is measured against.
+  assert.ok(text.includes('list $'), 'list price derived from discount')
+  // 3. Seller rows state the ratio to the CURRENT route.
+  assert.ok(text.includes('3.0\u00d7 the current price'), '1.5/0.5 out ratio shown')
+  unmount()
+})
+
+test('persona findings: proxy-down shows a plain message, not the raw error', async () => {
+  const view = await openDialog({
+    rest: async () => {
+      throw new Error('fetch failed: connection refused')
+    },
+  })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-load-error')))
+  const text = view.getByTestId('llmux-load-error').textContent
+  assert.ok(text.includes('pricing is unreachable'), 'plain cause')
+  assert.ok(text.includes('Your chat still works'), 'reassurance')
+  unmount()
+})
+
+test('persona findings: empty list distinguishes fresh catalog from still-loading', async () => {
+  const fresh = await openDialog({
+    rest: async () => ({ data: [], similar: [], current: null, freshness: { updated_at: Date.now() / 1000 } }),
+  })
+  await waitFor(() => assert.ok(fresh.getByTestId('llmux-empty')))
+  assert.match(fresh.getByTestId('llmux-empty').textContent, /No sellers .* on any source/)
+  unmount()
+  const loading = await openDialog({
+    rest: async () => ({ data: [], similar: [], current: null, freshness: null }),
+  })
+  await waitFor(() => assert.ok(loading.getByTestId('llmux-empty')))
+  assert.match(loading.getByTestId('llmux-empty').textContent, /still loading/)
+  unmount()
+})
+
+test('exported helpers: fmtPrice tiers keep columns comparable', () => {
+  assert.equal(plugin.fmtPrice(1.2), '$1.20')
+  assert.equal(plugin.fmtPrice(7.448), '$7.45')
+  assert.equal(plugin.fmtPrice(0.38), '$0.38')
+  assert.equal(plugin.fmtPrice(0.0288), '$0.029')
+  assert.equal(plugin.fmtPrice(0.0045), '$0.0045')
+  assert.equal(plugin.fmtPrice(NaN), 'unknown')
+})
+
+test('exported helpers: replyEstimateSeconds and vsCurrent edge cases', () => {
+  assert.equal(plugin.replyEstimateSeconds({ tps_p50: 100, ttft_p50_ms: 1000 }), 11)
+  assert.equal(plugin.replyEstimateSeconds({ tps_p50: 100, ttft_p50_ms: null }), null)
+  assert.equal(plugin.replyEstimateSeconds({ estimated_reply_seconds: 5, tps_p50: 1, ttft_p50_ms: 999999 }), 5)
+  assert.equal(plugin.vsCurrent({ kind: 'model', output_per_m: 9 }, { output_per_m: 1 }), null)
+  assert.equal(plugin.vsCurrent({ output_per_m: 0.96 }, { output_per_m: 1 }), null, 'within 5%: not worth a badge')
+  assert.equal(plugin.vsCurrent({ output_per_m: 0.9 }, { output_per_m: 1 }), 0.9, '10% cheaper is worth showing')
+  assert.equal(plugin.vsCurrent({ output_per_m: null }, { output_per_m: 1 }), null)
 })
 
 test('exported helpers: routedByLlmux', () => {

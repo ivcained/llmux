@@ -197,10 +197,17 @@ function fmtMs(ms, missing = 'unknown') {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-/** AntSeed-style price text: dollar amount, trailing zeros trimmed. */
-function fmtPrice(value) {
+/**
+ * Per-million price text with FIXED decimals per tier, so a column of prices
+ * lines up for comparison: $1.20 / $0.38 / $0.029 / $0.0045. Variable
+ * trailing-zero trimming made "$1.2" sit next to "$7.448" and forced the
+ * reader to do alignment math.
+ */
+export function fmtPrice(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return 'unknown'
-  return `$${value.toFixed(4).replace(/\.?0+$/, '')}`
+  const abs = Math.abs(value)
+  const decimals = abs >= 0.1 ? 2 : abs >= 0.01 ? 3 : 4
+  return `$${value.toFixed(decimals)}`
 }
 
 /**
@@ -328,16 +335,64 @@ function StatBlock({ value, label, accent = false }) {
   })
 }
 
-function metaLine(option) {
-  const reply =
-    typeof option.estimated_reply_seconds === 'number'
-      ? `~${option.estimated_reply_seconds}s estimated for 1000 output tokens`
-      : speedPublished(option)
-        ? 'reply estimate unknown'
-        : `speed not published by ${option.seller || option.source}`
+/**
+ * Estimated seconds for a 1000-token reply. The server computes it for seller
+ * rows; similar-model rows arrive without it even though they carry the exact
+ * inputs (first-token time and tok/s), so the card derives the same estimate
+ * instead of printing "reply estimate unknown" beside the numbers it needs.
+ */
+export function replyEstimateSeconds(option) {
+  if (typeof option?.estimated_reply_seconds === 'number') return option.estimated_reply_seconds
+  const tps = finiteNumber(option?.tps_p50)
+  const ttft = finiteNumber(option?.ttft_p50_ms)
+  if (tps === null || tps <= 0 || ttft === null) return null
+  return ttft / 1000 + 1000 / tps
+}
+
+/** "63% off list" needs the list price in reach, or it is not a number. */
+export function listOutPerM(option) {
+  const out = finiteNumber(option?.output_per_m)
+  const disc = finiteNumber(option?.discount_pct)
+  if (out === null || disc === null || disc >= 99.5 || disc < 0) return null
+  return out / (1 - disc / 100)
+}
+
+/** How this row's price compares with the current route, as a plain ratio. */
+export function vsCurrent(row, current) {
+  // Similar-model rows already carry their own price_ratio note ("0.5x the
+  // current list price"); a second ratio beside it would read as a conflict.
+  if (row?.kind === 'model') return null
+  const rowOut = finiteNumber(row?.output_per_m)
+  const curOut = finiteNumber(current?.output_per_m)
+  if (rowOut === null || curOut === null || curOut <= 0) return null
+  if (rowOut === curOut) return null
+  const ratio = rowOut / curOut
+  if (ratio >= 0.95 && ratio <= 1.05) return null
+  return ratio
+}
+
+function metaLine(option, current = null) {
+  const est = replyEstimateSeconds(option)
+  const reply = est !== null
+    ? `~${est.toFixed(1)}s estimated for 1000 output tokens`
+    : speedPublished(option)
+      ? 'reply estimate unknown'
+      : `speed not published by ${option.seller || option.source}`
   if (!speedPublished(option)) return reply
+  const parts = [reply]
+  const list = listOutPerM(option)
+  if (list !== null) parts.push(`list ${fmtPrice(list)}/M out`)
   const samples = typeof option.samples === 'number' ? `${option.samples} samples` : 'samples unknown'
-  return `${reply} · ${samples}`
+  parts.push(samples)
+  const ratio = vsCurrent(option, current)
+  if (ratio !== null) {
+    parts.push(
+      ratio > 1
+        ? `${ratio.toFixed(1)}\u00d7 the current price`
+        : `cheaper than current (${ratio.toFixed(2)}\u00d7)`,
+    )
+  }
+  return parts.join(' \u00b7 ')
 }
 
 function cacheLine(option, contextTokens) {
@@ -348,10 +403,10 @@ function cacheLine(option, contextTokens) {
   if (cost === null) {
     return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens; this route does not report an input price.`
   }
-  return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens · uncached input ${fmtUsd(cost)} on this route`
+  return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens · next input \u2248 ${fmtUsd(cost)} on this route (no cache discount)`
 }
 
-function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [] }) {
+function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [], current = null }) {
   const cache = option.cache_warning
   const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : missingSpeed(option)
   return jsxs('div', {
@@ -394,7 +449,7 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
       }),
       jsx('div', {
         className: 'mt-2 text-[11px] text-(--ui-text-secondary)',
-        children: metaLine(option),
+        children: metaLine(option, isCurrent ? null : current),
       }),
       option.note
         ? jsx('div', {
@@ -774,7 +829,17 @@ function SwitchDialog({ onClose }) {
           })
         : null,
       loadError
-        ? jsx('div', { className: 'rounded border border-(--ui-stroke-secondary) p-3 text-sm', children: loadError })
+        ? jsxs('div', {
+            className: 'rounded border border-(--ui-stroke-secondary) p-3 text-sm',
+            'data-testid': 'llmux-load-error',
+            children: [
+              jsx('p', { children: 'LLMUX pricing is unreachable right now. Your chat still works on its current route.' }),
+              jsx('p', {
+                className: 'mt-1 text-(--ui-text-secondary)',
+                children: `The local pricing helper did not respond (${loadError}). Reopen this card in a moment; it usually recovers when Hermes restarts the helper.`,
+              }),
+            ],
+          })
         : null,
       failed
         ? jsxs('div', {
@@ -802,7 +867,11 @@ function SwitchDialog({ onClose }) {
           : !loadError && options.length === 0 && !failed
             ? jsx('div', {
                 className: 'py-6 text-sm text-(--ui-text-secondary)',
-                children: 'No measured offers for this model. Start the proxy or wait for the catalog to refresh.',
+                'data-testid': 'llmux-empty',
+                children:
+                  data?.freshness?.updated_at
+                    ? 'No sellers for this model on any source right now. Prices were refreshed recently.'
+                    : 'No measured offers for this model yet. Live pricing is still loading; reopen this card in a moment.',
               })
             : jsxs('div', {
                 className: 'flex max-h-[50vh] flex-col gap-3 overflow-y-auto',
@@ -817,6 +886,7 @@ function SwitchDialog({ onClose }) {
                           {
                             option,
                             contextTokens,
+                            current,
                             isCurrent: isCurrentRoute(option, current),
                             tags: optionTags.get(option) || [],
                             onChoose: option => setSelected({ option, binding: captureBinding() }),
@@ -840,6 +910,7 @@ function SwitchDialog({ onClose }) {
                               {
                                 option,
                                 contextTokens,
+                                current,
                                 onChoose: picked => setSelected({ option: picked, binding: captureBinding() }),
                               },
                               `model:${row.model}`,
