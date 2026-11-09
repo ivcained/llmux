@@ -6,7 +6,45 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 
-from .adapters import ANTSEED_DEFAULT_BASE_URL, SURPLUS_DEFAULT_BASE_URL
+from pathlib import Path
+
+from .adapters import ANTSEED_DEFAULT_BASE_URL, SOLID_DEFAULT_BASE_URL, SURPLUS_DEFAULT_BASE_URL
+
+# Key names checked in order. Hermes stores a custom provider's key as
+# HERMES_CUSTOM_<NAME>_API_KEY, so a user who already added Solid as a Hermes
+# provider needs no second copy of the key.
+SOLID_KEY_NAMES = ("LLMUX_SOLID_API_KEY", "SOLID_API_KEY", "HERMES_CUSTOM_SOLID_API_KEY")
+HERMES_ENV_FILE = Path.home() / ".hermes" / ".env"
+
+
+def _dotenv_value(names: tuple[str, ...], path: Path = HERMES_ENV_FILE) -> str | None:
+    """First matching value from Hermes's own .env, for keys the gateway did
+    not export into this process. Reads only the named keys; never logs them."""
+
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    found: dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.removeprefix("export ").partition("=")
+        name = name.strip()
+        if name in names:
+            found[name] = value.strip().strip('"').strip("'")
+    for name in names:
+        if found.get(name):
+            return found[name]
+    return None
+
+
+def _first(values: Mapping[str, str], names: tuple[str, ...]) -> str | None:
+    for name in names:
+        if values.get(name):
+            return values[name]
+    return None
 from .routing import POLICY_ALIASES, TPS_FLOORS
 
 
@@ -25,6 +63,8 @@ class Settings:
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
     track_usage: bool = True
+    solid_base_url: str = SOLID_DEFAULT_BASE_URL
+    solid_api_key: str | None = None
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -67,4 +107,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         catalog_ttl_seconds=catalog_ttl,
         upstream_timeout_seconds=timeout,
         track_usage=(values.get("LLMUX_TRACK_USAGE") or "1").strip() != "0",
+        solid_base_url=(values.get("LLMUX_SOLID_BASE_URL") or SOLID_DEFAULT_BASE_URL).rstrip("/"),
+        solid_api_key=_first(values, SOLID_KEY_NAMES)
+        or (_dotenv_value(SOLID_KEY_NAMES) if env is None else None),
     )

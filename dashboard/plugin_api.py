@@ -73,8 +73,11 @@ def _read(path: str) -> dict:
 
 
 @router.get("/seller-options")
-def seller_options(model: str) -> dict:
-    return _read("/llmux/seller-options?" + urllib.parse.urlencode({"model": model}))
+def seller_options(model: str, provider: str = "") -> dict:
+    params = {"model": model}
+    if provider:
+        params["provider"] = provider
+    return _read("/llmux/seller-options?" + urllib.parse.urlencode(params))
 
 
 @router.get("/similar-models")

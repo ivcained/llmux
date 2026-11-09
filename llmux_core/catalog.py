@@ -8,6 +8,9 @@ from .models import ModelRecord
 
 MODEL_ALIASES = {
     "kimi-k3-1-pro": "kimi-k3.1-pro",
+    # Solid writes version dots as dashes; Surplus uses dots for the same model.
+    "claude-opus-5-5": "claude-opus-5.5",
+    "claude-sonnet-5-5": "claude-sonnet-5.5",
 }
 
 

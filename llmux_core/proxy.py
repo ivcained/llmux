@@ -27,6 +27,26 @@ STREAM_CHUNK_SIZE = 8192
 # No served LLM sustains generation above this; higher figures come from cached
 # or trivially short completions and must not win a speed ranking.
 MAX_PLAUSIBLE_TPS = 2000.0
+# Sources that sell at a fixed published price and report no speed figures.
+UNMEASURED_SOURCES = frozenset({"solid"})
+
+
+def provider_source(provider: str | None) -> str | None:
+    """Map a Hermes provider id to the marketplace it names.
+
+    None means the chat goes through LLMUX (or the provider is not known), so
+    the LLMUX planner is authoritative. ``"unknown"`` means some other direct
+    provider that LLMUX has no prices for.
+    """
+
+    value = (provider or "").strip().lower()
+    if not value or value == "llmux" or value.endswith(":llmux"):
+        return None
+    value = value.split(":", 1)[-1]
+    for source in ("solid", "surplus", "antseed"):
+        if source in value:
+            return source
+    return "unknown"
 
 
 def _number(value: Any) -> float | None:
@@ -416,7 +436,14 @@ class ProxyServer:
             return []
         offers = [
             offer for offer in self._routable_offers(record)
-            if offer.healthy and (plausible_tps(offer.tps_p50) or offer.ttft_p50_ms)
+            if offer.healthy
+            and (
+                plausible_tps(offer.tps_p50)
+                or offer.ttft_p50_ms
+                # Fixed-price APIs publish no telemetry; list them with speed
+                # shown as unknown rather than hiding a real route.
+                or offer.source in UNMEASURED_SOURCES
+            )
         ]
         if not offers:
             return []
@@ -593,7 +620,49 @@ class ProxyServer:
         rows.sort(key=lambda row: (-(row["tps_p50"] or 0.0), row["price_ratio"]))
         return rows[:limit]
 
-    def current_route(self, model: str) -> dict | None:
+    def current_route(self, model: str, provider: str | None = None) -> dict | None:
+        """The route a chat is on, honouring the Hermes provider it actually uses.
+
+        A chat on a non-LLMUX Hermes provider (for example Solid directly) is
+        not routed here, so planning it through LLMUX would name the wrong
+        seller. In that case the matching marketplace offer is reported with
+        ``direct: true``; an unknown provider is reported by name with no
+        prices rather than borrowing another source's numbers.
+        """
+
+        source = provider_source(provider)
+        if source is None:
+            return self._planned_route(model)
+        bare = self._bare_model(model)
+        record = self._get_catalog().get(bare) if bare else None
+        offer = None
+        if record is not None and source != "unknown":
+            offer = next(
+                (o for o in record.offers if o.source == source and o.healthy), None
+            )
+        label = (provider or "").split(":", 1)[-1] or "unknown"
+        return {
+            "model": record.id if record else bare,
+            "name": record.name if record and record.name else bare,
+            "requested": model,
+            "source": source if source != "unknown" else label,
+            "seller": (offer.seller if offer and offer.seller else label),
+            "provider_id": None,
+            "peer_id": None,
+            "input_per_m": offer.input_per_m if offer else None,
+            "output_per_m": offer.output_per_m if offer else None,
+            "tps_p50": plausible_tps(offer.tps_p50) if offer else None,
+            "ttft_p50_ms": offer.ttft_p50_ms if offer else None,
+            "samples": offer.samples if offer else 0,
+            "policy": None,
+            "applied_policy": None,
+            "floor_relaxed": False,
+            "reason": f"direct Hermes provider {label}; LLMUX is not routing this chat",
+            "pinned": True,
+            "direct": True,
+        }
+
+    def _planned_route(self, model: str) -> dict | None:
         """The route this model string resolves to right now, with its measurements.
 
         Answers "which model and seller am I actually on?" without spending a
@@ -625,9 +694,10 @@ class ProxyServer:
             "floor_relaxed": decision.floor_relaxed,
             "reason": decision.reason,
             "pinned": bool(directive.source or directive.peer_id or directive.provider_id),
+            "direct": False,
         }
 
-    def seller_options_payload(self, model: str) -> dict:
+    def seller_options_payload(self, model: str, provider: str | None = None) -> dict:
         """One response carrying sellers, comparable models and the current route.
 
         The desktop backend mounts its routes once per gateway run, so a newly
@@ -640,7 +710,7 @@ class ProxyServer:
             "object": "list",
             "data": self.seller_options(model, limit=self.config.card_seller_limit),
             "similar": self.similar_models(model, limit=self.config.card_similar_limit),
-            "current": self.current_route(model),
+            "current": self.current_route(model, provider),
             "savings": self.savings_payload(),
         }
 
@@ -832,9 +902,10 @@ class ProxyServer:
                         self._json(200, proxy.plan_route({"model": model}))
                         return
                     if path == "/llmux/seller-options":
-                        raw_query = urlsplit(self.path).query
-                        model = parse_qs(raw_query).get("model", [""])[0]
-                        self._json(200, proxy.seller_options_payload(model))
+                        query = parse_qs(urlsplit(self.path).query)
+                        model = query.get("model", [""])[0]
+                        provider = query.get("provider", [""])[0] or None
+                        self._json(200, proxy.seller_options_payload(model, provider))
                         return
                     if path == "/llmux/savings":
                         raw_days = parse_qs(urlsplit(self.path).query).get("days", ["30"])[0]

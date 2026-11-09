@@ -186,14 +186,62 @@ function fmtPrice(value) {
   return `$${value.toFixed(4).replace(/\.?0+$/, '')}`
 }
 
+/**
+ * The Hermes provider the focused chat really uses. The SDK exposes the model
+ * slug but not the provider, and a chat on Solid directly must not be shown as
+ * an LLMUX-planned Surplus route. `model.options` answers from the session's
+ * live agent; failure leaves the provider unknown (null), never guessed.
+ */
+async function focusedProvider() {
+  const sessionId = host.state.focusedSessionId.get()
+  try {
+    const res = await host.request('model.options', sessionId ? { session_id: sessionId } : {})
+    return typeof res?.provider === 'string' && res.provider ? res.provider : null
+  } catch {
+    return null
+  }
+}
+
+/** True when the chat goes through LLMUX (or the provider is unknown). */
+export function routedByLlmux(provider) {
+  const value = String(provider || '').trim().toLowerCase()
+  return !value || value === 'llmux' || value.endsWith(':llmux')
+}
+
+/** Client-side "you are on a direct provider" panel data, for backends that predate `direct`. */
+export function directCurrent(model, provider) {
+  const label = String(provider).split(':').pop()
+  return {
+    model,
+    name: model,
+    source: label,
+    seller: label,
+    input_per_m: null,
+    output_per_m: null,
+    tps_p50: null,
+    ttft_p50_ms: null,
+    pinned: true,
+    direct: true,
+    reason: `direct Hermes provider ${label}; LLMUX is not routing this chat`,
+  }
+}
+
 async function fetchOptions(model) {
   if (!restFn) {
     throw new Error('LLMUX backend is not enabled. Enable it in Settings > Plugins > LLMUX.')
   }
-  const body = await restFn(`/seller-options?model=${encodeURIComponent(model)}`)
+  const provider = await focusedProvider()
+  const query = new URLSearchParams({ model })
+  if (provider && !routedByLlmux(provider)) query.set('provider', provider)
+  const body = await restFn(`/seller-options?${query.toString()}`)
   const options = Array.isArray(body?.data) ? body.data : []
   if (options[0]?.error) throw new Error(options[0].error)
-  const current = body?.current && typeof body.current === 'object' ? body.current : null
+  let current = body?.current && typeof body.current === 'object' ? body.current : null
+  if (provider && !routedByLlmux(provider) && !current?.direct) {
+    // Older backend ignored the provider and planned an LLMUX route; that would
+    // name the wrong seller, so say what the chat is actually on.
+    current = directCurrent(model, provider)
+  }
   let similar = Array.isArray(body?.similar) ? body.similar : null
   let similarNote = null
   if (similar === null) {
@@ -453,7 +501,11 @@ function CurrentPanel({ current, base }) {
           jsx(SectionLabel, { children: 'Current route' }),
           jsx('span', { className: 'truncate text-sm font-semibold', children: current.name || current.model }),
           jsx(Badge, { variant: 'outline', children: current.source }),
-          current.pinned ? jsx(Badge, { variant: 'outline', children: 'pinned' }) : null,
+          current.direct
+            ? jsx(Badge, { variant: 'outline', children: 'direct' })
+            : current.pinned
+              ? jsx(Badge, { variant: 'outline', children: 'pinned' })
+              : null,
           jsx('span', {
             className: 'ml-auto shrink-0 text-[11px] text-(--ui-text-secondary)',
             children: current.seller,
@@ -740,7 +792,7 @@ function SwitchCard() {
         variant: 'outline',
         className: 'h-7 text-xs',
         onClick: () => setOpen(true),
-        children: busy ? 'LLMUX: seller…' : 'LLMUX seller',
+        children: busy ? 'LLMUX…' : 'LLMUX',
       }),
       open
         ? jsx(Dialog, {

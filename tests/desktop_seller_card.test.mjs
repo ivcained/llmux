@@ -179,7 +179,7 @@ async function openDialog(overrides = {}) {
   shim.reset(overrides)
   const card = registerCard()
   const view = render(card.render())
-  fireEvent.click(view.getByText(overrides.busy ? 'LLMUX: seller…' : 'LLMUX seller'))
+  fireEvent.click(view.getByText(overrides.busy ? 'LLMUX…' : 'LLMUX'))
   await waitFor(() => assert.ok(view.getByTestId('dialog')))
   return view
 }
@@ -322,7 +322,7 @@ test('validation failure aborts before any session mutation', async () => {
   await openAndPick(view)
   await confirm(view)
   await waitFor(() => assert.ok(view.getByTestId('confirm-error').textContent.includes('route not planned')))
-  assert.equal(seqIndex(e => e.type === 'rpc'), -1, 'no interrupt, no config.set')
+  assert.equal(seqIndex(e => e.type === 'rpc' && e.method !== 'model.options'), -1, 'no interrupt, no config.set')
   assert.equal(shim.notifications.length, 0, 'no success claimed')
   unmount()
 })
@@ -335,7 +335,7 @@ test('no focused session refuses honestly before validation', async () => {
     assert.ok(view.getByTestId('confirm-error').textContent.includes('No focused chat session')),
   )
   assert.equal(seqIndex(e => e.type === 'rest' && e.path === '/validate-route'), -1)
-  assert.equal(seqIndex(e => e.type === 'rpc'), -1)
+  assert.equal(seqIndex(e => e.type === 'rpc' && e.method !== 'model.options'), -1)
   unmount()
 })
 
@@ -675,6 +675,69 @@ test('savings panel hides when tracking is disabled or absent', async () => {
   unmount()
 })
 
+test('the composer button is labelled just LLMUX', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()]) })
+  assert.ok(view.getByText('LLMUX'))
+  assert.equal(view.queryByText('LLMUX seller'), null)
+  unmount()
+})
+
+test('a chat on Solid directly shows Solid as the current route, not an LLMUX plan', async () => {
+  const seen = []
+  const rest = async path => {
+    seen.push(path)
+    if (path.startsWith('/seller-options')) {
+      return {
+        data: [offer()],
+        similar: [],
+        current: {
+          model: 'deepseek-v4.1-flash',
+          name: 'DeepSeek V4.1 Flash',
+          source: 'solid',
+          seller: 'Solid',
+          input_per_m: 0,
+          output_per_m: 0,
+          tps_p50: null,
+          ttft_p50_ms: null,
+          direct: true,
+          pinned: true,
+          reason: 'direct Hermes provider solid; LLMUX is not routing this chat',
+        },
+      }
+    }
+    throw new Error(`unexpected rest path: ${path}`)
+  }
+  const view = await openDialog({
+    rest,
+    request: async method => (method === 'model.options' ? { provider: 'solid', model: 'deepseek/deepseek-v4.1-flash' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByText('direct')))
+  assert.ok(seen.some(p => p.includes('provider=solid')), `provider forwarded: ${seen}`)
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(text.includes('DeepSeek V4.1 Flash'), text)
+  assert.ok(text.includes('via Solid'), text)
+  unmount()
+})
+
+test('an old backend that ignores the provider still cannot mislabel a direct chat', async () => {
+  const view = await openDialog({
+    rest: offersPayload([offer()], [], { ...CURRENT, source: 'surplus', seller: 'Surplus auto' }),
+    request: async method => (method === 'model.options' ? { provider: 'solid' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByText('direct')))
+  const text = view.getByTestId('dialog').textContent
+  assert.ok(!text.includes('via Surplus auto'), text)
+  assert.ok(text.includes('via solid'), text)
+  unmount()
+})
+
+test('exported helpers: routedByLlmux', () => {
+  assert.equal(plugin.routedByLlmux(null), true)
+  assert.equal(plugin.routedByLlmux('llmux'), true)
+  assert.equal(plugin.routedByLlmux('custom:llmux'), true)
+  assert.equal(plugin.routedByLlmux('solid'), false)
+})
+
 test('exported helpers: routeTarget, bareModel, uncachedInputCostUsd', () => {
   const { bareModel, routeTarget, uncachedInputCostUsd } = plugin
   assert.equal(bareModel('model@surplus@peer:x'), 'model')
@@ -711,6 +774,9 @@ for (const [name, fn] of tests) {
     failures += 1
     console.error(`FAIL ${name}`)
     console.error(err instanceof Error ? err.stack || err.message : err)
+  } finally {
+    // A failing test must not leave its render mounted for the next one.
+    unmount()
   }
 }
 unmount()

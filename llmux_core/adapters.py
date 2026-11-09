@@ -13,6 +13,21 @@ from .models import ModelRecord, Offer
 
 SURPLUS_DEFAULT_BASE_URL = "https://api.surplusintelligence.ai/v1"
 ANTSEED_DEFAULT_BASE_URL = "http://127.0.0.1:8377/v1"
+SOLID_DEFAULT_BASE_URL = "https://accounts.solid.xyz/accounts/v1/ai/v1"
+
+# Solid publishes no pricing or speed API: its /models lists ids only. These
+# per-million prices and "less than official" percentages are copied from the
+# Solid dashboard (Models & prices) and are dated so a stale table is visible.
+# Override any row with LLMUX_SOLID_PRICES_JSON (same shape) when they change.
+SOLID_PRICES_AS_OF = "2026-11-09"
+SOLID_PRICES = {
+    "deepseek/deepseek-v4.1-flash": {"in": 0.0, "cached": 0.0, "out": 0.0, "off_pct": None},
+    "claude-opus-5-5": {"in": 0.38, "cached": 0.27, "out": 1.20, "off_pct": 92},
+    "gpt-6.1-sol": {"in": 0.14, "cached": 0.007, "out": 0.66, "off_pct": 93},
+    "kimi-k3": {"in": 0.16, "cached": 0.080, "out": 0.60, "off_pct": 95},
+    "claude-sonnet-5-5": {"in": 0.34, "cached": 0.24, "out": 1.02, "off_pct": 87},
+    "glm-5.3": {"in": 0.008, "cached": 0.007, "out": 0.44, "off_pct": 94},
+}
 
 
 class CatalogSchemaError(ValueError):
@@ -149,6 +164,76 @@ class SurplusAdapter:
         marketplace_url = f"{parts.scheme}://{parts.netloc}/api/marketplace"
         marketplace = _get_json(marketplace_url, self.timeout)
         return self.parse_catalog(models, marketplace)
+
+
+class SolidAdapter:
+    """Solid AI API: one OpenAI-compatible key, a fixed discounted price table.
+
+    Model ids come live from ``/models`` (so a removed model disappears), prices
+    from the dated dashboard table above. Solid reports no speed figures, so
+    TPS and first-token stay ``None`` and render as unknown, never guessed.
+    """
+
+    source = "solid"
+
+    def __init__(
+        self,
+        base_url: str = SOLID_DEFAULT_BASE_URL,
+        api_key: str | None = None,
+        timeout: float = 15.0,
+        prices: dict | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+        self.prices = {**SOLID_PRICES, **(prices or {})}
+
+    @staticmethod
+    def parse_catalog(payload: dict, prices: dict | None = None) -> list[ModelRecord]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise CatalogSchemaError("Solid models payload has no data list")
+        table = prices if prices is not None else SOLID_PRICES
+        records: list[ModelRecord] = []
+        for model in payload["data"]:
+            model_id = model.get("id") if isinstance(model, dict) else None
+            if not model_id:
+                continue
+            price = table.get(model_id)
+            if price is None:
+                # Listed by Solid but not in the price table: routable only
+                # once its price is known, so it is skipped rather than shown
+                # as free.
+                continue
+            input_per_m = float(price["in"])
+            output_per_m = float(price["out"])
+            metadata: dict = {"source": "solid", "prices_as_of": SOLID_PRICES_AS_OF}
+            off = price.get("off_pct")
+            if isinstance(off, (int, float)) and 0 < off < 100:
+                metadata["list_input_per_m"] = input_per_m / (1 - off / 100)
+                metadata["list_output_per_m"] = output_per_m / (1 - off / 100)
+            records.append(
+                ModelRecord(
+                    id=canonical_model_id(model_id.rsplit("/", 1)[-1]),
+                    name=model.get("display_name") or model_id,
+                    offers=(
+                        Offer(
+                            source=SolidAdapter.source,
+                            upstream_model=model_id,
+                            input_per_m=input_per_m,
+                            output_per_m=output_per_m,
+                            cached_input_per_m=price.get("cached"),
+                            seller="Solid",
+                        ),
+                    ),
+                    aliases=(model_id,),
+                    metadata=metadata,
+                )
+            )
+        return records
+
+    def fetch_catalog(self) -> list[ModelRecord]:
+        payload = _get_json(f"{self.base_url}/models", self.timeout, api_key=self.api_key)
+        return self.parse_catalog(payload, self.prices)
 
 
 class AntseedAdapter:

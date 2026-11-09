@@ -9,6 +9,7 @@ SOURCE_ALIASES = {
     "surp": "surplus",
     "antseed": "antseed",
     "ant": "antseed",
+    "solid": "solid",
 }
 POLICY_ALIASES = {
     "cheap": "cheapest",
