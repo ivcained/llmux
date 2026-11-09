@@ -126,7 +126,10 @@ def choose_offer(
     if tps_floor is not None and tps_floor not in TPS_FLOORS:
         raise ValueError(f"unsupported TPS floor: {tps_floor}")
 
-    candidates = [offer for offer in record.offers if offer.healthy]
+    # Auto-routing only uses offers no marketplace has flagged untrusted.
+    candidates = [
+        offer for offer in record.offers if offer.healthy and offer.trusted is not False
+    ]
     if source:
         candidates = [offer for offer in candidates if offer.source == source]
     if not candidates:

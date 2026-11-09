@@ -48,6 +48,29 @@ const MAX_SIMILAR = 3
 // cheap: every read is answered from memory.
 const LIVE_REFRESH_MS = 15_000
 
+const TRUST_VIEWS = [
+  { id: 'trusted', label: 'Trusted sellers' },
+  { id: 'all', label: 'All sellers' },
+]
+
+/**
+ * Trust badge text for a row in the "All sellers" view. Marketplaces that
+ * publish a signal get Trusted / Untrusted; a source with no signal (a
+ * fixed-price API) gets no badge rather than an invented verdict.
+ */
+export function trustLabel(row) {
+  if (row?.trusted === true) return 'Trusted'
+  if (row?.trusted === false) return 'Untrusted'
+  return null
+}
+
+/** Rows for the chosen trust view. Older backends send only `data`. */
+export function rowsForTrustView(data, view) {
+  const trustedRows = Array.isArray(data?.options) ? data.options : []
+  if (view !== 'all') return trustedRows.filter(row => row?.trusted !== false)
+  return Array.isArray(data?.allOptions) ? data.allOptions : trustedRows
+}
+
 const SORTS = [
   { id: 'recommended', label: 'Recommended' },
   { id: 'speed', label: 'Speed' },
@@ -293,7 +316,9 @@ async function fetchOptions(model) {
   }
   const savings = body?.savings && typeof body.savings === 'object' ? body.savings : null
   const freshness = body?.freshness && typeof body.freshness === 'object' ? body.freshness : null
-  return { options, similar, current, similarNote, savings, freshness }
+  const allOptions = Array.isArray(body?.all_sellers) ? body.all_sellers : null
+  const untrustedCount = finiteNumber(body?.untrusted_count)
+  return { options, allOptions, untrustedCount, similar, current, similarNote, savings, freshness }
 }
 
 async function validateRoute(model) {
@@ -406,7 +431,8 @@ function cacheLine(option, contextTokens) {
   return `Switching re-sends ~${contextTokens.toLocaleString()} context tokens · next input \u2248 ${fmtUsd(cost)} on this route (no cache discount)`
 }
 
-function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [], current = null }) {
+function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [], current = null, showTrust = false }) {
+  const trust = showTrust ? trustLabel(option) : null
   const cache = option.cache_warning
   const tps = typeof option.tps_p50 === 'number' ? String(option.tps_p50) : missingSpeed(option)
   return jsxs('div', {
@@ -418,6 +444,20 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
           jsx('span', { className: 'truncate text-sm font-medium', children: option.label || option.seller }),
           jsx(Badge, { variant: 'outline', children: option.source }),
           isCurrent ? jsx(Badge, { variant: 'outline', children: 'current' }) : null,
+          trust
+            ? jsx(
+                'span',
+                {
+                  'data-testid': 'llmux-trust',
+                  title: option.trust_basis || undefined,
+                  className:
+                    trust === 'Untrusted'
+                      ? 'rounded border border-(--ui-text-warning,#d97706) px-1.5 text-[10px] font-medium text-(--ui-text-warning,#d97706)'
+                      : 'rounded border border-(--ui-stroke-secondary) px-1.5 text-[10px] font-medium text-(--ui-text-secondary)',
+                  children: trust === 'Untrusted' ? '\u26a0 Untrusted' : '\u2713 Trusted',
+                },
+              )
+            : null,
           ...tags.map(tag => jsx(Badge, { variant: 'secondary', children: tag }, `tag:${tag}`)),
           jsxs('div', {
             className: 'ml-auto flex shrink-0 items-center gap-2',
@@ -455,6 +495,12 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
         ? jsx('div', {
             className: 'mt-1 text-[11px] text-(--ui-text-secondary)',
             children: option.note,
+          })
+        : null,
+      trust === 'Untrusted'
+        ? jsx('div', {
+            className: 'mt-1 text-[11px] text-(--ui-text-warning,#d97706)',
+            children: `${option.trust_basis || 'Flagged by its marketplace'}. LLMUX never auto-routes here; switch only if you accept the risk.`,
           })
         : null,
       cache
@@ -671,6 +717,7 @@ function SwitchDialog({ onClose }) {
   const [selected, setSelected] = useState(null)
   const [failed, setFailed] = useState(null)
   const [sort, setSort] = useState('recommended')
+  const [trustView, setTrustView] = useState('trusted')
 
   const query = useQuery({
     queryKey: ['llmux', 'seller-options', base],
@@ -687,7 +734,12 @@ function SwitchDialog({ onClose }) {
   const data = query.data || {}
   // No slice here: the proxy serves a wider candidate set so a price sort can
   // surface a cheap route the speed ranking would have cut.
-  const options = Array.isArray(data.options) ? data.options : []
+  const options = rowsForTrustView(data, trustView)
+  const showTrust = trustView === 'all'
+  const untrustedCount =
+    typeof data.untrustedCount === 'number'
+      ? data.untrustedCount
+      : (Array.isArray(data.allOptions) ? data.allOptions : []).filter(row => row?.trusted === false).length
   const similar = Array.isArray(data.similar) ? data.similar : []
   const similarNote = typeof data.similarNote === 'string' ? data.similarNote : null
   const current = data.current || null
@@ -802,6 +854,46 @@ function SwitchDialog({ onClose }) {
       base ? jsx(SavingsPanel, { savings }) : null,
       base
         ? jsxs('div', {
+            className: 'flex flex-wrap items-center gap-2',
+            children: [
+              jsx('div', {
+                role: 'radiogroup',
+                'aria-label': 'Which sellers to show',
+                'data-testid': 'llmux-trust-switch',
+                className: 'inline-flex rounded-md border border-(--ui-stroke-secondary) p-0.5',
+                children: TRUST_VIEWS.map(entry =>
+                  jsx(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'radio',
+                      'aria-checked': trustView === entry.id,
+                      onClick: () => setTrustView(entry.id),
+                      className:
+                        trustView === entry.id
+                          ? 'rounded px-2.5 py-1 text-[11px] font-medium bg-(--ui-accent) text-(--ui-accent-foreground,white)'
+                          : 'rounded px-2.5 py-1 text-[11px] text-(--ui-text-secondary)',
+                      children:
+                        entry.id === 'all' && untrustedCount > 0
+                          ? `${entry.label} (+${untrustedCount} untrusted)`
+                          : entry.label,
+                    },
+                    `trust:${entry.id}`,
+                  ),
+                ),
+              }),
+              jsx('span', {
+                className: 'text-[10px] text-(--ui-text-secondary)',
+                children:
+                  trustView === 'all'
+                    ? 'Showing every seller with its marketplace trust label.'
+                    : 'Hiding sellers their marketplace flags as untrusted.',
+              }),
+            ],
+          })
+        : null,
+      base
+        ? jsxs('div', {
             className: 'flex flex-wrap items-center gap-1',
             children: [
               jsx(SectionLabel, { children: 'Sort by' }),
@@ -887,6 +979,7 @@ function SwitchDialog({ onClose }) {
                             option,
                             contextTokens,
                             current,
+                            showTrust,
                             isCurrent: isCurrentRoute(option, current),
                             tags: optionTags.get(option) || [],
                             onChoose: option => setSelected({ option, binding: captureBinding() }),
@@ -932,7 +1025,9 @@ function SwitchDialog({ onClose }) {
         onConfirm: () => applySwitch(selected),
         title: `Switch to ${selected?.option?.label || selected?.option?.seller || 'this route'}?`,
         description:
-          selected?.option?.kind === 'model'
+          selected?.option?.trusted === false
+            ? `${selected.option.trust_basis || 'This seller is flagged untrusted by its marketplace'}. Its replies may be unreliable or its terms unverified. This validates the route, stops any in-flight turn, and re-sends the entire conversation to this seller. Cached-prefix discounts are lost. Nothing replays automatically.`
+            : selected?.option?.kind === 'model'
             ? 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new model. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.'
             : 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new seller. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.',
         confirmLabel: selected?.option?.kind === 'model' ? 'Switch model' : 'Switch seller',

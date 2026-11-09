@@ -265,8 +265,9 @@ class AntseedAdapter:
             offers: list[Offer] = []
             for peer in model.get("peers", []):
                 reputation = float(peer.get("effectiveReputationScore") or 0)
-                if reputation < min_reputation:
-                    continue
+                # Peers under the reputation bar stay listed (labelled
+                # untrusted) instead of vanishing; routing skips them.
+                trusted = reputation >= min_reputation
                 health = peer.get("health") or {}
                 status = health.get("status")
                 performance = peer.get("performance") or {}
@@ -287,6 +288,11 @@ class AntseedAdapter:
                         reputation=reputation,
                         seller=peer.get("displayName") or "",
                         peer_id=peer_id,
+                        trusted=trusted,
+                        trust_basis=(
+                            f"Antseed reputation {reputation:.0f}"
+                            + ("" if trusted else f" (below {min_reputation:.0f})")
+                        ),
                     )
                 )
             aliases = tuple(dict.fromkeys([model_id, *model.get("aliases", [])]))

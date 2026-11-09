@@ -639,7 +639,7 @@ class CurrentRouteTests(ProxyCase):
 
     def test_payload_carries_sellers_similar_and_current(self):
         payload = self.proxy.seller_options_payload("kimi-k3.1-pro")
-        self.assertEqual(sorted(payload), ["current", "data", "freshness", "object", "savings", "similar"])
+        self.assertEqual(sorted(payload), ["all_sellers", "current", "data", "freshness", "object", "savings", "similar", "untrusted_count"])
         current = payload["current"]
         assert current is not None
         self.assertEqual(current["model"], "kimi-k3.1-pro")

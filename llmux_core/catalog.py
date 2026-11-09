@@ -47,7 +47,9 @@ class Catalog:
             records=tuple(
                 record
                 for record in merged.values()
-                if any(offer.healthy for offer in record.offers)
+                # A model only untrusted sellers serve cannot be auto-routed,
+                # so it is not advertised as an available model.
+                if any(offer.healthy and offer.trusted is not False for offer in record.offers)
             )
         )
 

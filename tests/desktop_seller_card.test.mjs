@@ -929,6 +929,56 @@ test('exported helpers: replyEstimateSeconds and vsCurrent edge cases', () => {
   assert.equal(plugin.vsCurrent({ output_per_m: null }, { output_per_m: 1 }), null)
 })
 
+test('trust switch: default hides untrusted, All shows every seller with a label', async () => {
+  const good = offer({ seller: 'Good Co', trusted: true, trust_basis: 'Surplus trusted seller', provider_id: 'good' })
+  const shady = offer({
+    seller: 'Shady Co',
+    trusted: false,
+    trust_basis: 'not trusted by Surplus',
+    provider_id: 'shady',
+    tps_p50: 900,
+  })
+  const plain = offer({ seller: 'Fixed API', source: 'solid', trusted: null, provider_id: null })
+  const view = await openDialog({
+    rest: async path => {
+      if (path.startsWith('/seller-options')) {
+        return { data: [good, plain], all_sellers: [shady, good, plain], untrusted_count: 1, similar: [], current: null }
+      }
+      throw new Error(`unexpected rest path: ${path}`)
+    },
+  })
+  await waitFor(() => assert.ok(view.getByText('Good Co')))
+  // Default: trusted view, no untrusted seller, no trust badges.
+  assert.equal(view.queryByText('Shady Co'), null)
+  assert.equal(view.queryAllByTestId('llmux-trust').length, 0)
+  const allButton = view.getByText('All sellers (+1 untrusted)')
+  assert.equal(view.getByText('Trusted sellers').getAttribute('aria-checked'), 'true')
+
+  fireEvent.click(allButton)
+  await waitFor(() => assert.ok(view.getByText('Shady Co')))
+  const badges = view.getAllByTestId('llmux-trust').map(node => node.textContent)
+  assert.deepEqual(badges.sort(), ['⚠ Untrusted', '✓ Trusted'], 'no invented verdict for a source without a signal')
+  assert.ok(view.getByTestId('dialog').textContent.includes('LLMUX never auto-routes here'))
+  assert.equal(allButton.getAttribute('aria-checked'), 'true')
+
+  // Picking an untrusted seller warns in the confirm dialog.
+  const shadyRow = view.getByText('Shady Co').closest('.rounded-md')
+  fireEvent.click(shadyRow.querySelector('button'))
+  await waitFor(() => assert.ok(view.getByTestId('confirm-dialog')))
+  assert.ok(view.getByTestId('confirm-dialog').textContent.includes('not trusted by Surplus'))
+  unmount()
+})
+
+test('exported helpers: trustLabel and rowsForTrustView on old backends', () => {
+  assert.equal(plugin.trustLabel({ trusted: true }), 'Trusted')
+  assert.equal(plugin.trustLabel({ trusted: false }), 'Untrusted')
+  assert.equal(plugin.trustLabel({ trusted: null }), null)
+  const rows = [{ seller: 'a', trusted: true }, { seller: 'b' }]
+  // Old backend: no all_sellers, so All falls back to the trusted list.
+  assert.equal(plugin.rowsForTrustView({ options: rows, allOptions: null }, 'all'), rows)
+  assert.deepEqual(plugin.rowsForTrustView({ options: [...rows, { seller: 'c', trusted: false }] }, 'trusted'), rows)
+})
+
 test('exported helpers: routedByLlmux', () => {
   assert.equal(plugin.routedByLlmux(null), true)
   assert.equal(plugin.routedByLlmux('llmux'), true)

@@ -50,7 +50,9 @@ class AntseedAdapterTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(record.id, "kimi-k3.1-pro")
         self.assertIn("kimi-k3-1-pro", record.aliases)
-        self.assertEqual(len(record.offers), 2)
+        # Every peer is kept; the reputation bar decides the trust label.
+        self.assertEqual(len(record.offers), 4)
+        self.assertEqual(sum(1 for o in record.offers if o.trusted), 2)
         self.assertEqual(record.offers[0].source, "antseed")
         self.assertEqual(
             record.offers[0].upstream_model,
@@ -59,11 +61,18 @@ class AntseedAdapterTests(unittest.TestCase):
         self.assertEqual(record.offers[0].tps_p50, 93)
         self.assertEqual(record.offers[0].samples, 160)
 
-    def test_reputation_threshold_controls_eligible_peers(self):
+    def test_reputation_threshold_controls_trust_label(self):
         records = AntseedAdapter.parse_catalog(
             fixture("antseed_models_kimi.json"), min_reputation=0
         )
         self.assertEqual(len(records[0].offers), 4)
+        self.assertTrue(all(o.trusted for o in records[0].offers))
+        strict = AntseedAdapter.parse_catalog(
+            fixture("antseed_models_kimi.json"), min_reputation=50
+        )
+        untrusted = [o for o in strict[0].offers if o.trusted is False]
+        self.assertEqual(len(untrusted), 2)
+        self.assertIn("below 50", untrusted[0].trust_basis)
 
     def test_malformed_payload_fails_closed(self):
         with self.assertRaises(CatalogSchemaError):
@@ -89,7 +98,8 @@ class UnionCatalogTests(unittest.TestCase):
         )
         catalog = Catalog.merge([surplus, antseed])
         self.assertEqual(len(catalog.records), 1)
-        self.assertEqual(len(catalog.get("kimi-k3-1-pro").offers), 3)
+        # 1 surplus + 4 antseed (2 of them labelled untrusted, still listed)
+        self.assertEqual(len(catalog.get("kimi-k3-1-pro").offers), 5)
         self.assertEqual(catalog.get("kimi-k3.1-pro").name, "Kimi K3.1 Pro")
 
     def test_models_without_routable_offers_are_excluded(self):

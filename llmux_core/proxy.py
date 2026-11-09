@@ -426,13 +426,21 @@ class ProxyServer:
         if record is None:
             raise NoRouteError(f"unknown model: {directive.model}")
         policy = directive.policy or self.config.policy
-        decision = choose_offer(
-            record,
-            policy=policy,
-            source=directive.source,
-            tps_floor=self.config.tps_floor,
-            balanced_tolerance=self.config.balanced_tolerance,
-        )
+        decision: RouteDecision | None
+        try:
+            decision = choose_offer(
+                record,
+                policy=policy,
+                source=directive.source,
+                tps_floor=self.config.tps_floor,
+                balanced_tolerance=self.config.balanced_tolerance,
+            )
+        except NoRouteError:
+            # No auto-routable (trusted) offer. An explicit seller pin below
+            # can still resolve; without one, the error stands.
+            if not (directive.peer_id or directive.provider_id):
+                raise
+            decision = None
         if directive.peer_id:
             pinned = [
                 offer
@@ -469,6 +477,8 @@ class ProxyServer:
                 applied_policy=policy,
                 reason="Surplus provider pinned by user",
             )
+        if decision is None:  # unreachable: each pin branch assigns or raises
+            raise NoRouteError(f"no route for {directive.model}")
         return (
             decision,
             directive,
@@ -624,8 +634,12 @@ class ProxyServer:
         except ValueError:
             return None
 
-    def seller_options(self, model: str, *, limit: int = 4) -> list[dict]:
-        """Return ranked seller options with timings and an honest cache warning."""
+    def seller_options(self, model: str, *, limit: int = 4, trust: str = "trusted") -> list[dict]:
+        """Return ranked seller options with timings and an honest cache warning.
+
+        ``trust="trusted"`` (default) hides offers a marketplace flagged as
+        untrusted; ``trust="all"`` lists them too, each row labelled.
+        """
 
         bare = self._bare_model(model)
         record = self._get_catalog().get(bare) if bare else None
@@ -634,6 +648,7 @@ class ProxyServer:
         offers = [
             offer for offer in self._routable_offers(record)
             if offer.healthy
+            and (trust == "all" or offer.trusted is not False)
             and (
                 plausible_tps(offer.tps_p50)
                 or offer.ttft_p50_ms
@@ -702,6 +717,10 @@ class ProxyServer:
                     # False when the source never publishes speed (Solid), as
                     # opposed to a measured source lacking data for this seller.
                     "speed_published": offer.source not in UNMEASURED_SOURCES,
+                    # True/False when the marketplace publishes a trust signal,
+                    # None when it does not (e.g. a fixed-price API).
+                    "trusted": offer.trusted,
+                    "trust_basis": offer.trust_basis or None,
                     "cache_warning": {
                         "text": (
                             "The next request sends the current conversation context to the "
@@ -902,6 +921,8 @@ class ProxyServer:
             "reason": decision.reason,
             "pinned": bool(directive.source or directive.peer_id or directive.provider_id),
             "direct": False,
+            "trusted": offer.trusted,
+            "trust_basis": offer.trust_basis or None,
             "speed_published": offer.source not in UNMEASURED_SOURCES,
         }
 
@@ -916,6 +937,11 @@ class ProxyServer:
 
         self.watch(model)
         sellers = self.seller_options(model, limit=self.config.card_seller_limit)
+        # Both views ride in one response so the card's Trusted / All switch
+        # flips instantly and works through gateway backends that predate it.
+        all_sellers = self.seller_options(
+            model, limit=self.config.card_seller_limit, trust="all"
+        )
         similar = self.similar_models(model, limit=self.config.card_similar_limit)
         current = self.current_route(model, provider)
         return {
@@ -923,6 +949,8 @@ class ProxyServer:
             # Read after the sections so a cold first call reports its own fetch.
             "freshness": self.freshness(model),
             "data": sellers,
+            "all_sellers": all_sellers,
+            "untrusted_count": sum(1 for row in all_sellers if row.get("trusted") is False),
             "similar": similar,
             "current": current,
             "savings": self.savings_payload(),
@@ -951,11 +979,13 @@ class ProxyServer:
                 alternatives = [
                     (alt.input_per_m, alt.output_per_m)
                     for alt in record.offers
-                    if alt.healthy
+                    # Savings are measured against routes LLMUX would use.
+                    if alt.healthy and alt.trusted is not False
                 ]
                 alternatives += [
                     (alt.input_per_m, alt.output_per_m)
                     for alt in self._surplus_detail_offers(offer.upstream_model)
+                    if alt.trusted is not False
                 ] if offer.source == "surplus" else []
             costs = compute_costs(
                 usage=usage,
@@ -1009,7 +1039,10 @@ class ProxyServer:
             free_live = [
                 rec.id
                 for rec in self._get_catalog().records
-                if any(o.healthy and o.input_per_m == 0 and o.output_per_m == 0 for o in rec.offers)
+                if any(
+                    o.healthy and o.trusted is not False and o.input_per_m == 0 and o.output_per_m == 0
+                    for o in rec.offers
+                )
             ][:3]
         except Exception:  # noqa: BLE001 - advice without the catalog is still advice
             free_live = []

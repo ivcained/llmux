@@ -23,6 +23,11 @@ class Offer:
     seller: str = ""
     peer_id: str | None = None
     provider_id: str | None = None
+    # Marketplace trust signal: True/False when the source publishes one,
+    # None when it does not. Auto-routing never picks a False offer; the user
+    # can still pin one explicitly from the "All sellers" view.
+    trusted: bool | None = None
+    trust_basis: str = ""
 
 
 @dataclass(frozen=True)

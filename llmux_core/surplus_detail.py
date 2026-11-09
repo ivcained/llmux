@@ -99,6 +99,14 @@ def join_offers(
                 healthy=True,
                 seller=str(offer.get("route_label") or offer.get("provider") or provider_id),
                 provider_id=str(provider_id),
+                trusted=offer.get("trusted") if isinstance(offer.get("trusted"), bool) else None,
+                trust_basis=(
+                    "Surplus trusted seller"
+                    if offer.get("trusted") is True
+                    else "not trusted by Surplus"
+                    if offer.get("trusted") is False
+                    else ""
+                ),
             )
         )
     return offers
