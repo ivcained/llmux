@@ -757,6 +757,27 @@ test('old gateway backend: direct Solid panel still gets name and prices from th
   unmount()
 })
 
+test('live freshness line shows the data age from the proxy', async () => {
+  const rest = async path => {
+    if (path.startsWith('/seller-options')) {
+      return { data: [offer()], similar: [], current: null, freshness: { updated_at: Date.now() / 1000 - 12, refreshing: false } }
+    }
+    throw new Error(`unexpected rest path: ${path}`)
+  }
+  const view = await openDialog({ rest })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-live')))
+  assert.match(view.getByTestId('llmux-live').textContent, /^Live · updated 1[0-9]s ago$/)
+  unmount()
+})
+
+test('exported helpers: freshnessText', () => {
+  const now = 1_000_000_000
+  assert.equal(plugin.freshnessText(null, now), null)
+  assert.equal(plugin.freshnessText({ updated_at: now / 1000 - 2 }, now), 'Live · updated just now')
+  assert.equal(plugin.freshnessText({ updated_at: now / 1000 - 125 }, now), 'Live · updated 2m ago')
+  assert.equal(plugin.freshnessText({ updated_at: now / 1000 - 30, refreshing: true }, now), 'Refreshing · updated 30s ago')
+})
+
 test('exported helpers: routedByLlmux', () => {
   assert.equal(plugin.routedByLlmux(null), true)
   assert.equal(plugin.routedByLlmux('llmux'), true)

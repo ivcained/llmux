@@ -9,6 +9,7 @@ import os
 from .adapters import AntseedAdapter, SolidAdapter, SurplusAdapter
 from .config import Settings
 from .ledger import Ledger
+from .livecache import Snapshot
 from .proxy import ProxyConfig, ProxyServer
 from .rewards import load_table
 
@@ -45,6 +46,7 @@ def build_proxy(settings: Settings) -> ProxyServer:
             allow_remote=settings.allow_remote,
         ),
         ledger=Ledger() if settings.track_usage else None,
+        snapshot=Snapshot(),
         rewards=load_table(),
     )
 

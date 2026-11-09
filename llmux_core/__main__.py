@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     proxy = build_proxy(settings)
     port = proxy.start(settings.host, settings.port)
+    # Keep the market cache live so the card never waits on the marketplaces.
+    proxy.start_warming()
     logging.getLogger("llmux").info(
         "LLMUX proxy listening on http://%s:%s/v1 (policy=%s, floor=%s)",
         settings.host,

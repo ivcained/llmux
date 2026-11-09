@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .catalog import Catalog
 from .insights import build_insights
+from .livecache import Snapshot, offer_from_dict, offer_to_dict, record_from_dict, record_to_dict
 from .ledger import Ledger, compute_costs, extract_usage
 from .rewards import RewardTable
 from .models import ModelDirective, ModelRecord, Offer, RouteDecision
@@ -128,6 +129,11 @@ class ProxyConfig:
     card_similar_limit: int = 6
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
+    # Live cache: keep these models' seller detail refreshed in the background
+    # so the card opens instantly. Models the user opens join automatically.
+    warm_models: tuple[str, ...] = ()
+    warm_interval_seconds: float = 45.0
+    warm_max_models: int = 24
 
 
 class ProxyServer:
@@ -140,6 +146,7 @@ class ProxyServer:
         *,
         ledger: Ledger | None = None,
         rewards: RewardTable | None = None,
+        snapshot: Snapshot | None = None,
     ) -> None:
         self.adapters = adapters
         self.config = config or ProxyConfig()
@@ -150,17 +157,59 @@ class ProxyServer:
         self._catalog: Catalog | None = None
         self._catalog_time = 0.0
         self._catalog_lock = threading.Lock()
-        self._detail_cache: dict[str, tuple[float, list[Offer]]] = {}
+        # Each cache entry: (monotonic fetch time, wall-clock fetch time, offers).
+        self._detail_cache: dict[str, tuple[float, float, list[Offer]]] = {}
         self._detail_lock = threading.Lock()
+        self._refreshing: set[str] = set()
+        self._catalog_wall: float | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._warm_stop = threading.Event()
+        self._warm_thread: threading.Thread | None = None
+        # Models opened in the card, most recent last; the warm loop keeps them live.
+        self._watched: list[str] = list(self.config.warm_models)
         self.source_errors: dict[str, str] = {}
+        # Persistence is opt-in like the ledger: tests construct without one.
+        self.snapshot = snapshot
+        if snapshot is not None:
+            self._load_snapshot()
 
     def _get_catalog(self) -> Catalog:
-        with self._catalog_lock:
+        """The market catalog, served from memory whenever one exists.
+
+        A stale catalog is returned immediately and refreshed on a background
+        thread (stale-while-revalidate), so opening the card never waits on
+        three marketplaces. Only a cold start with no snapshot blocks.
+        """
+
+        if self._catalog is not None:
             age = time.monotonic() - self._catalog_time
-            if self._catalog is not None and age < self.config.catalog_ttl_seconds:
-                return self._catalog
+            if age >= self.config.catalog_ttl_seconds:
+                self._spawn_refresh("__catalog__", self._refresh_catalog)
+            return self._catalog
+        return self._refresh_catalog()
+
+    def _spawn_refresh(self, key: str, target) -> None:
+        """Run one background refresh per key; concurrent callers do not pile up."""
+
+        with self._detail_lock:
+            if key in self._refreshing:
+                return
+            self._refreshing.add(key)
+
+        def run() -> None:
+            try:
+                target()
+            except Exception as exc:  # noqa: BLE001 - the old value keeps serving
+                LOGGER.debug("background refresh %s failed: %s", key, exc)
+            finally:
+                with self._detail_lock:
+                    self._refreshing.discard(key)
+
+        threading.Thread(target=run, daemon=True, name=f"llmux-refresh-{key}").start()
+
+    def _refresh_catalog(self) -> Catalog:
+        with self._catalog_lock:
             groups: list[list[ModelRecord]] = []
             errors: dict[str, str] = {}
             for name, adapter in self.adapters.items():
@@ -175,6 +224,11 @@ class ProxyServer:
             if groups:
                 self._catalog = Catalog.merge(groups)
                 self._catalog_time = time.monotonic()
+                self._catalog_wall = time.time()
+                self._save_snapshot()
+            elif self._catalog is not None:
+                # Every source failed: keep serving the last market, retry soon.
+                self._catalog_time = time.monotonic() - self.config.catalog_ttl_seconds + 15.0
             if self._catalog is None:
                 raise UpstreamError("no marketplace catalog is available", retryable=True)
             return self._catalog
@@ -193,17 +247,160 @@ class ProxyServer:
             return []
         with self._detail_lock:
             cached = self._detail_cache.get(upstream_model)
-            if cached is not None and time.monotonic() - cached[0] < self.config.detail_ttl_seconds:
-                return cached[1]
+        if cached is not None:
+            if time.monotonic() - cached[0] >= self.config.detail_ttl_seconds:
+                self._spawn_refresh(
+                    f"detail:{upstream_model}",
+                    lambda: self._fetch_detail(fetch, upstream_model),
+                )
+            return cached[2]
+        return self._fetch_detail(fetch, upstream_model)
+
+    def _fetch_detail(self, fetch, upstream_model: str) -> list[Offer]:
         try:
             raw = fetch(upstream_model)
         except Exception as exc:  # noqa: BLE001 - detail is best-effort enrichment
             LOGGER.debug("surplus detail unavailable for %s: %s", upstream_model, exc)
+            with self._detail_lock:
+                cached = self._detail_cache.get(upstream_model)
+                if cached is not None:
+                    # Keep the last good offers; retry after a short backoff.
+                    self._detail_cache[upstream_model] = (
+                        time.monotonic() - self.config.detail_ttl_seconds + 15.0,
+                        cached[1],
+                        cached[2],
+                    )
+                    return cached[2]
             return []
         offers = [offer for offer in raw if isinstance(offer, Offer)] if isinstance(raw, (list, tuple)) else []
         with self._detail_lock:
-            self._detail_cache[upstream_model] = (time.monotonic(), offers)
+            self._detail_cache[upstream_model] = (time.monotonic(), time.time(), offers)
+        self._save_snapshot()
         return offers
+
+    def freshness(self, model: str | None = None) -> dict[str, Any]:
+        """Wall-clock age of what the card is showing, so stale data says so."""
+
+        now = time.time()
+        detail_at = None
+        bare = self._bare_model(model) if model else None
+        if bare and self._catalog is not None:
+            record = self._catalog.get(bare)
+            aggregate = next(
+                (o for o in (record.offers if record else ()) if o.source == "surplus"), None
+            )
+            if aggregate is not None:
+                with self._detail_lock:
+                    cached = self._detail_cache.get(aggregate.upstream_model)
+                detail_at = cached[1] if cached else None
+        stamps = [t for t in (self._catalog_wall, detail_at) if t is not None]
+        oldest = min(stamps) if stamps else None
+        with self._detail_lock:
+            refreshing = bool(self._refreshing)
+        return {
+            "updated_at": oldest,
+            "age_seconds": round(now - oldest, 1) if oldest is not None else None,
+            "refreshing": refreshing,
+            "live_interval_seconds": self.config.warm_interval_seconds,
+        }
+
+    # -- live cache: watch list, warm loop, snapshot ---------------------------
+
+    def watch(self, model: str) -> None:
+        """Keep a model's sellers refreshed in the background from now on."""
+
+        bare = self._bare_model(model)
+        if not bare:
+            return
+        with self._detail_lock:
+            if bare in self._watched:
+                self._watched.remove(bare)
+            self._watched.append(bare)
+            del self._watched[: max(0, len(self._watched) - self.config.warm_max_models)]
+
+    def warm_once(self) -> None:
+        """Refresh the catalog and every watched model's seller detail now."""
+
+        try:
+            catalog = self._refresh_catalog()
+        except UpstreamError:
+            return
+        adapter = self.adapters.get("surplus")
+        fetch = getattr(adapter, "provider_offers", None)
+        if not callable(fetch):
+            return
+        with self._detail_lock:
+            watched = list(self._watched)
+        for model in watched:
+            if self._warm_stop.is_set():
+                return
+            record = catalog.get(model)
+            aggregate = next(
+                (o for o in (record.offers if record else ()) if o.source == "surplus"), None
+            )
+            if aggregate is not None:
+                self._fetch_detail(fetch, aggregate.upstream_model)
+
+    def start_warming(self) -> None:
+        """Background loop that keeps the market cache live. Idempotent."""
+
+        if self._warm_thread is not None:
+            return
+        self._warm_stop.clear()
+
+        def loop() -> None:
+            while not self._warm_stop.is_set():
+                try:
+                    self.warm_once()
+                except Exception as exc:  # noqa: BLE001 - the loop must survive any upstream fault
+                    LOGGER.warning("market warm cycle failed: %s", exc)
+                self._warm_stop.wait(self.config.warm_interval_seconds)
+
+        self._warm_thread = threading.Thread(target=loop, daemon=True, name="llmux-warm")
+        self._warm_thread.start()
+
+    def _save_snapshot(self) -> None:
+        if self.snapshot is None or self._catalog is None:
+            return
+        with self._detail_lock:
+            detail = {
+                model: {"fetched_at": entry[1], "offers": [offer_to_dict(o) for o in entry[2]]}
+                for model, entry in self._detail_cache.items()
+            }
+            watched = list(self._watched)
+        self.snapshot.save(
+            {
+                "catalog_fetched_at": self._catalog_wall,
+                "catalog": [record_to_dict(r) for r in self._catalog.records],
+                "detail": detail,
+                "watched": watched,
+            }
+        )
+
+    def _load_snapshot(self) -> None:
+        """Seed memory from disk. Seeded data is served but immediately stale."""
+
+        assert self.snapshot is not None
+        data = self.snapshot.load()
+        records = [r for r in (record_from_dict(x) for x in data.get("catalog") or []) if r]
+        if records:
+            self._catalog = Catalog(records=tuple(records))
+            self._catalog_time = -1e9  # stale: first read triggers a background refresh
+            wall = data.get("catalog_fetched_at")
+            self._catalog_wall = float(wall) if isinstance(wall, (int, float)) else None
+        for model, entry in (data.get("detail") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            offers = [o for o in (offer_from_dict(x) for x in entry.get("offers") or []) if o]
+            wall = entry.get("fetched_at")
+            self._detail_cache[model] = (
+                -1e9,
+                float(wall) if isinstance(wall, (int, float)) else 0.0,
+                offers,
+            )
+        for model in data.get("watched") or []:
+            if isinstance(model, str) and model not in self._watched:
+                self._watched.append(model)
 
     def _routable_offers(self, record: ModelRecord) -> tuple[Offer, ...]:
         """Offers a user may choose: Antseed peers plus named Surplus providers.
@@ -706,11 +903,17 @@ class ProxyServer:
         without a restart; the standalone endpoints stay for direct API users.
         """
 
+        self.watch(model)
+        sellers = self.seller_options(model, limit=self.config.card_seller_limit)
+        similar = self.similar_models(model, limit=self.config.card_similar_limit)
+        current = self.current_route(model, provider)
         return {
             "object": "list",
-            "data": self.seller_options(model, limit=self.config.card_seller_limit),
-            "similar": self.similar_models(model, limit=self.config.card_similar_limit),
-            "current": self.current_route(model, provider),
+            # Read after the sections so a cold first call reports its own fetch.
+            "freshness": self.freshness(model),
+            "data": sellers,
+            "similar": similar,
+            "current": current,
             "savings": self.savings_payload(),
         }
 
@@ -1078,6 +1281,10 @@ class ProxyServer:
         return self._server.server_port
 
     def stop(self) -> None:
+        self._warm_stop.set()
+        if self._warm_thread is not None:
+            self._warm_thread.join(timeout=5)
+            self._warm_thread = None
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()

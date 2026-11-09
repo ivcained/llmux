@@ -44,7 +44,9 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'llmux'
 const MAX_OPTIONS = 4
 const MAX_SIMILAR = 3
-const LIVE_REFRESH_MS = 30_000
+// The proxy serves from its live cache and refreshes behind it, so polling is
+// cheap: every read is answered from memory.
+const LIVE_REFRESH_MS = 15_000
 
 const SORTS = [
   { id: 'recommended', label: 'Recommended' },
@@ -268,7 +270,8 @@ async function fetchOptions(model) {
     }
   }
   const savings = body?.savings && typeof body.savings === 'object' ? body.savings : null
-  return { options, similar, current, similarNote, savings }
+  const freshness = body?.freshness && typeof body.freshness === 'object' ? body.freshness : null
+  return { options, similar, current, similarNote, savings, freshness }
 }
 
 async function validateRoute(model) {
@@ -476,6 +479,15 @@ export function SavingsPanel({ savings }) {
   })
 }
 
+/** "Live · updated 12s ago" — data age in plain words, never implied fresh. */
+export function freshnessText(freshness, nowMs = Date.now()) {
+  const at = finiteNumber(freshness?.updated_at)
+  if (at === null) return null
+  const age = Math.max(0, Math.round(nowMs / 1000 - at))
+  const ago = age < 5 ? 'just now' : age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age / 60)}m ago` : `${Math.round(age / 3600)}h ago`
+  return `${freshness.refreshing ? 'Refreshing' : 'Live'} \u00b7 updated ${ago}`
+}
+
 function SectionLabel({ children }) {
   return jsx('div', {
     className: 'text-[10px] uppercase tracking-wide text-(--ui-text-secondary)',
@@ -566,6 +578,11 @@ function SwitchDialog({ onClose }) {
     enabled: Boolean(base),
     // Live pricing: marketplace prices and speeds move with seller liquidity.
     refetchInterval: LIVE_REFRESH_MS,
+    // Reopening the card shows the last rows at once and refreshes behind them
+    // (TanStack keeps the entry in the app's shared QueryClient).
+    staleTime: LIVE_REFRESH_MS,
+    gcTime: 30 * 60 * 1000,
+    refetchOnMount: 'always',
   })
   const data = query.data || {}
   // No slice here: the proxy serves a wider candidate set so a price sort can
@@ -578,6 +595,7 @@ function SwitchDialog({ onClose }) {
   const sortedSimilar = sortRows(similar, sort).slice(0, MAX_SIMILAR)
   const optionTags = rowTags(options)
   const savings = data.savings || null
+  const liveText = freshnessText(data.freshness)
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
 
   function notifyPinned(option) {
@@ -687,6 +705,13 @@ function SwitchDialog({ onClose }) {
             className: 'flex flex-wrap items-center gap-1',
             children: [
               jsx(SectionLabel, { children: 'Sort by' }),
+              liveText
+                ? jsx('span', {
+                    className: 'ml-auto order-last text-[10px] text-(--ui-text-secondary)',
+                    'data-testid': 'llmux-live',
+                    children: liveText,
+                  })
+                : null,
               SORTS.map(entry =>
                 jsx(
                   Button,
