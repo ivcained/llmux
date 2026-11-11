@@ -1,7 +1,7 @@
 name: llmux
 title: LLMUX
 repo: https://github.com/ivcained/llmux
-sha: 07aa7e2370aef88149fa92569d5bfc96c45e3d61
+sha: ff263e550a1ecc8a8c0b012b22e6043b091afaf1
 description: "Cross-marketplace LLM router: unions the Surplus Intelligence and Antseed inference markets behind one Hermes provider, routes each request by cheapest, fastest or balanced policy, and adds a composer card that shows the current route, named sellers with measured median TPS and time-to-first-token, comparable models in the same price tier, and a one-click mid-chat switch. Disclosure — registers one model provider at import (base URL http://127.0.0.1:8378/v1) and starts one detached local child process, `python -m llmux_core`, bound to 127.0.0.1 only; it is skipped when that port is already served or LLMUX_AUTOSTART=0, and its output is appended to ~/.hermes/logs/llmux-proxy.log. That child makes outbound HTTPS requests to https://api.surplusintelligence.ai and local HTTP requests to an optional Antseed buyer proxy at http://127.0.0.1:8377. The plugin writes no other files, holds no wallet or private key, performs no on-chain action, contains no self-updating code, and never patches Hermes or Desktop: the desktop half uses only the plugin SDK, and the dashboard half exposes read-only passthrough routes to the local proxy."
 maintainer: ivcained
 tier: community
