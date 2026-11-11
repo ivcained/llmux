@@ -14,6 +14,17 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.tps_floor)
         self.assertEqual(settings.antseed_min_reputation, 50.0)
 
+    def test_usage_tracking_is_disabled_without_explicit_opt_in(self):
+        self.assertFalse(Settings().track_usage)
+        self.assertFalse(load_settings({}).track_usage)
+        self.assertIsNone(build_proxy(load_settings({})).ledger)
+
+    def test_usage_tracking_requires_the_explicit_one_value(self):
+        for value in ("0", "false", "no", ""):
+            with self.subTest(value=value):
+                self.assertFalse(load_settings({"LLMUX_TRACK_USAGE": value}).track_usage)
+        self.assertTrue(load_settings({"LLMUX_TRACK_USAGE": "1"}).track_usage)
+
     def test_environment_overrides(self):
         settings = load_settings(
             {

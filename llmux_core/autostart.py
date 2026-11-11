@@ -95,13 +95,35 @@ def ensure_proxy_running(
         return None
 
     plugin_dir = Path(plugin_dir)
-    base_env = dict(os.environ if env is None else env)
+    from .config import SOLID_KEY_NAMES, SURPLUS_KEY_NAMES, _scoped_credentials
+    from .credentials import profile_home
+
+    values = os.environ if env is None else env
+    # Never inherit unrelated gateway tokens, shell approvals or another profile's keys.
+    process_names = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR",
+                     "SYSTEMROOT", "USERPROFILE", "SSL_CERT_FILE", "SSL_CERT_DIR", "PYTHONPATH")
+    setting_names = (
+        "LLMUX_POLICY", "LLMUX_TPS_FLOOR", "LLMUX_BALANCED_TOLERANCE", "LLMUX_HOST",
+        "LLMUX_ALLOW_REMOTE", "LLMUX_TRACK_USAGE", "LLMUX_ALLOW_FAILOVER",
+        "LLMUX_SURPLUS_BASE_URL", "LLMUX_ANTSEED_BASE_URL", "LLMUX_SOLID_BASE_URL",
+        "LLMUX_ANTSEED_MIN_REPUTATION", "LLMUX_CATALOG_TTL_SECONDS", "LLMUX_UPSTREAM_TIMEOUT_SECONDS",
+        "LLMUX_SOLID_PRICES_JSON", "LLMUX_LEDGER_PATH", "LLMUX_REWARDS_JSON", "LLMUX_MARKET_CACHE",
+    )
+    base_env = {name: values[name] for name in (*process_names, *setting_names) if name in values}
+    secrets = _scoped_credentials() if env is None else env
+    if not any(secrets.get(name) for name in (*SURPLUS_KEY_NAMES, *SOLID_KEY_NAMES)):
+        # The daemon requires a secret-backed capability and would exit before binding.
+        return None
+    base_env.update({name: secrets[name] for name in (*SURPLUS_KEY_NAMES, *SOLID_KEY_NAMES)
+                     if secrets.get(name)})
+    base_env["HERMES_HOME"] = str(profile_home())
+    base_env["LLMUX_PORT"] = str(port)
     existing_python_path = base_env.get("PYTHONPATH")
     base_env["PYTHONPATH"] = (
         f"{plugin_dir}{os.pathsep}{existing_python_path}" if existing_python_path else str(plugin_dir)
     )
 
-    logs = Path(log_dir) if log_dir is not None else Path.home() / ".hermes" / "logs"
+    logs = Path(log_dir) if log_dir is not None else profile_home() / "logs"
     out: object = subprocess.DEVNULL
     log_handle = None
     try:

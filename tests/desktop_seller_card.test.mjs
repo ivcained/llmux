@@ -207,6 +207,38 @@ function test(name, fn) {
   tests.push([name, fn])
 }
 
+test('same-model chat change reloads current provider and route', async () => {
+  const view = await openDialog({
+    model: 'test-model',
+    request: async method => method === 'model.options'
+      ? { provider: shim.state.focusedSessionId.get() === 'sess-1' ? 'solid' : 'llmux' }
+      : {},
+    rest: offersPayload([offer(), offer({ source: 'solid', seller: 'Solid', input_per_m: 0.38, output_per_m: 1.2 })], [], CURRENT),
+  })
+  await waitFor(() => assert.ok(view.getByTestId('dialog').textContent.includes('direct Hermes provider solid')))
+  await act(async () => { shim.setFocusedSessionId('sess-2') })
+  await waitFor(() => assert.ok(!view.getByTestId('dialog').textContent.includes('direct Hermes provider solid')))
+  assert.ok(shim.seq.some(e => e.method === 'model.options' && e.params.session_id === 'sess-2'))
+  unmount()
+})
+
+test('trusted-only empty state does not claim no sellers on any source', async () => {
+  const view = await openDialog({
+    rest: async () => ({
+      data: [],
+      all_sellers: [offer({ trusted: false, trust_basis: 'Marketplace flag' })],
+      untrusted_count: 1,
+      similar: [],
+      freshness: { updated_at: Date.now() / 1000 },
+    }),
+  })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-empty').textContent.includes('No sellers in the trusted view')))
+  assert.ok(!view.getByTestId('llmux-empty').textContent.includes('on any source'))
+  fireEvent.click(view.getByRole('radio', { name: /All sellers/ }))
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  unmount()
+})
+
 test('registers composer-adjacent (composer.actions), not the statusbar', () => {
   shim.reset({ rest: offersPayload([offer()]) })
   const card = registerCard()
@@ -262,6 +294,9 @@ test('cache warning uses live focusedUsage context_used and the route price', as
   const text = view.getByTestId('dialog').textContent
   assert.ok(text.includes('12,345 context tokens'), 'context token count from focusedUsage')
   assert.ok(text.includes('next input \u2248 $0.0062'), 'cost = 12345 * $0.5/1M, labelled as a cost')
+  assert.ok(text.includes('next request sends the current context'), 'switch cost occurs on the next request, not during route selection')
+  assert.ok(text.includes('may lose cached-prefix discounts'), 'cache loss is possible, not guaranteed')
+  assert.ok(!text.includes('drops the cached-prefix discount'), 'no guaranteed cache-loss claim')
   unmount()
 })
 
@@ -300,6 +335,22 @@ test('happy path: validate before interrupt before config.set, then verified suc
   const success = shim.notifications.find(n => n.kind === 'success')
   assert.ok(success.message.includes('nothing replays automatically'), 'no auto-replay promise broken')
   await waitFor(() => assert.equal(view.queryByTestId('dialog'), null))
+  unmount()
+})
+
+test('focus change while interrupt awaits prevents config.set', async () => {
+  const view = await openDialog({
+    busy: true,
+    rest: offersPayload([offer()]),
+    request: async method => {
+      if (method === 'session.interrupt') shim.setFocusedSessionId('another-chat')
+      return {}
+    },
+  })
+  await openAndPick(view)
+  await confirm(view)
+  await waitFor(() => assert.ok(view.getByTestId('confirm-error').textContent.includes('focused chat')))
+  assert.ok(!shim.seq.some(e => e.method === 'config.set'), 'stale binding must not set a model')
   unmount()
 })
 
@@ -951,7 +1002,7 @@ test('trust switch: default hides untrusted, All shows every seller with a label
   // Default: trusted view, no untrusted seller, no trust badges.
   assert.equal(view.queryByText('Shady Co'), null)
   assert.equal(view.queryAllByTestId('llmux-trust').length, 0)
-  const allButton = view.getByText('All sellers (+1 untrusted)')
+  const allButton = view.getByText('All sellers (1 flagged market-wide)')
   assert.equal(view.getByText('Trusted sellers').getAttribute('aria-checked'), 'true')
 
   fireEvent.click(allButton)
@@ -965,7 +1016,11 @@ test('trust switch: default hides untrusted, All shows every seller with a label
   const shadyRow = view.getByText('Shady Co').closest('.rounded-md')
   fireEvent.click(shadyRow.querySelector('button'))
   await waitFor(() => assert.ok(view.getByTestId('confirm-dialog')))
-  assert.ok(view.getByTestId('confirm-dialog').textContent.includes('not trusted by Surplus'))
+  const warning = view.getByTestId('confirm-dialog').textContent
+  assert.ok(warning.includes('not trusted by Surplus'))
+  assert.ok(warning.includes('next request sends the current context'), 'pinning is not a new paid request')
+  assert.ok(warning.includes('may lose cached-prefix discounts'), 'cache loss is not guaranteed')
+  assert.ok(warning.includes('stopped request may still be charged'), 'interruption does not promise a refund')
   unmount()
 })
 
@@ -1009,6 +1064,175 @@ test('exported helpers: routeTarget, bareModel, uncachedInputCostUsd', () => {
   assert.ok(Math.abs(uncachedInputCostUsd(12000, 0.5) - 0.006) < 1e-12)
   assert.equal(uncachedInputCostUsd(null, 0.5), null)
   assert.equal(uncachedInputCostUsd(12000, null), null)
+})
+
+test('seller-options carries the full pinned directive; similar-models stays bare', async () => {
+  const seen = []
+  const rest = async path => {
+    seen.push(path)
+    // No `similar` key on purpose: the standalone fallback must also fire.
+    if (path.startsWith('/seller-options')) return { data: [offer()], current: null }
+    if (path.startsWith('/similar-models')) return { data: [] }
+    throw new Error(`unexpected rest path: ${path}`)
+  }
+  const pinned = 'test-model@surplus@provider:inferhub'
+  const view = await openDialog({ model: pinned, rest })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const sellerCall = seen.find(p => p.startsWith('/seller-options'))
+  assert.ok(
+    sellerCall.includes(`model=${encodeURIComponent(pinned)}`),
+    `full directive forwarded so the proxy resolves the pinned current route: ${sellerCall}`,
+  )
+  const similarCall = seen.find(p => p.startsWith('/similar-models'))
+  assert.ok(similarCall, 'similar-models fallback fired')
+  assert.ok(!similarCall.includes('%40'), `list matching stays on the bare model: ${similarCall}`)
+  unmount()
+})
+
+test('the seller name shrinks so the Switch button is never clipped off the row', async () => {
+  const longName = 'A Marketplace Seller With An Extremely Long Display Name'
+  const view = await openDialog({
+    rest: offersPayload([offer({ seller: longName, label: longName, discount_pct: 90 })]),
+  })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const name = view.getByText(longName)
+  assert.ok(name.className.includes('min-w-0'), `name cell may shrink below content size: ${name.className}`)
+  assert.ok(name.className.includes('truncate'), `name cell ellipsizes instead of pushing the button out: ${name.className}`)
+  assert.ok(
+    name.parentElement.className.includes('flex-wrap'),
+    `header wraps badges/actions onto a second line when even the shrunk name cannot fit: ${name.parentElement.className}`,
+  )
+  unmount()
+})
+
+test('long speed placeholders render compact instead of truncating in the metrics grid', async () => {
+  const rows = [
+    offer({ seller: 'Solid', source: 'solid', tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, speed_published: false }),
+  ]
+  const view = await openDialog({ rest: offersPayload(rows) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  for (const cell of view.getAllByText('not published')) {
+    assert.ok(!cell.className.includes('truncate'), `no ellipsis on the placeholder: ${cell.className}`)
+    assert.ok(cell.className.includes('text-xs'), `compact size so it fits the column: ${cell.className}`)
+  }
+  unmount()
+})
+
+test('active trust tab foreground comes from the real theme midground-foreground var', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()]) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const active = view.getByText('Trusted sellers')
+  assert.equal(active.getAttribute('aria-checked'), 'true')
+  assert.ok(!active.className.includes('ui-accent-foreground'), `no undefined-var white fallback: ${active.className}`)
+  assert.ok(
+    (active.getAttribute('style') || '').includes('--dt-midground-foreground'),
+    'accessible foreground paired with the accent fill',
+  )
+  unmount()
+})
+
+test('the All sellers tab counts flagged sellers market-wide, not visible rows', async () => {
+  const view = await openDialog({
+    rest: async path => {
+      if (path.startsWith('/seller-options')) {
+        return {
+          data: [offer()],
+          all_sellers: [offer(), offer({ trusted: false, provider_id: 'shady1' }), offer({ trusted: false, provider_id: 'shady2' })],
+          untrusted_count: 2,
+          similar: [],
+          current: null,
+        }
+      }
+      throw new Error(`unexpected rest path: ${path}`)
+    },
+  })
+  await waitFor(() => assert.ok(view.getByText('All sellers (2 flagged market-wide)')))
+  unmount()
+})
+
+test('the route list carries the desktop scroll-fade affordance and a capped height', async () => {
+  const view = await openDialog({ rest: offersPayload([offer()]) })
+  await waitFor(() => assert.equal(view.getAllByText('Switch').length, 1))
+  const list = view.container.querySelector('[class*="max-h-"]')
+  assert.ok(list, 'list container rendered')
+  assert.ok(list.className.includes('scroll-fade-y'), `edge-aware fade from the desktop stylesheet: ${list.className}`)
+  assert.equal(list.style.maxHeight, '50vh', 'height cap holds even where the arbitrary class is not compiled')
+  unmount()
+})
+
+test('unsupported direct provider empty state names the provider and keeps the chat honest', async () => {
+  const view = await openDialog({
+    model: 'openai.gpt-6-astra',
+    rest: async path => {
+      if (path.startsWith('/seller-options')) {
+        return { data: [], all_sellers: [], untrusted_count: 0, similar: [], current: null, freshness: { updated_at: Date.now() / 1000 } }
+      }
+      throw new Error(`unexpected rest path: ${path}`)
+    },
+    request: async method => (method === 'model.options' ? { provider: 'bedrock' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-empty')))
+  const text = view.getByTestId('llmux-empty').textContent
+  assert.ok(text.includes("No matching offers in LLMUX's connected sources"), text)
+  assert.ok(text.includes('Your Bedrock chat continues directly'), text)
+  assert.ok(text.includes('Choose an LLMUX-supported model to compare sellers'), text)
+  assert.ok(!text.includes('on any source'), 'never claims nobody sells the model')
+  unmount()
+})
+
+test('connected direct provider empty state keeps the catalog wording', async () => {
+  const view = await openDialog({
+    rest: async () => ({ data: [], all_sellers: [], untrusted_count: 0, similar: [], current: null, freshness: { updated_at: Date.now() / 1000 } }),
+    request: async method => (method === 'model.options' ? { provider: 'solid' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByTestId('llmux-empty')))
+  const text = view.getByTestId('llmux-empty').textContent
+  assert.match(text, /No sellers .* on any source/)
+  assert.ok(!text.includes('No matching offers'), text)
+  unmount()
+})
+
+test('unsupported direct provider: prices labelled not connected; measured unknowns stay unknown', async () => {
+  const current = {
+    model: 'openai.gpt-6-astra',
+    name: 'GPT-6 Astra',
+    source: 'bedrock',
+    seller: 'bedrock',
+    provider_id: null,
+    peer_id: null,
+    input_per_m: null,
+    output_per_m: null,
+    tps_p50: null,
+    ttft_p50_ms: null,
+    samples: 0,
+    reason: 'direct Hermes provider bedrock; LLMUX is not routing this chat',
+    pinned: true,
+    direct: true,
+  }
+  const view = await openDialog({
+    rest: offersPayload([offer({ tps_p50: null, ttft_p50_ms: null, estimated_reply_seconds: null, discount_pct: null })], [], current),
+    request: async method => (method === 'model.options' ? { provider: 'bedrock' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByText('Current route')))
+  const panel = view.getByText('Current route').closest('.rounded-md')
+  assert.ok(panel.textContent.includes('Pricing not connected'), panel.textContent)
+  assert.ok(!/\$\d/.test(panel.textContent), `no invented price: ${panel.textContent}`)
+  // A measured-source row that simply lacks data keeps the honest unknown.
+  assert.ok(view.getAllByText('unknown').length >= 2, 'legitimate unknown measurements preserved in the offer row')
+  unmount()
+})
+
+test('connected direct provider with an unmeasured price still says unknown', async () => {
+  const current = { ...CURRENT, source: 'surplus', seller: 'Surplus auto', input_per_m: null, output_per_m: null, direct: true, pinned: true }
+  const view = await openDialog({
+    rest: offersPayload([offer()], [], current),
+    request: async method => (method === 'model.options' ? { provider: 'surplus' } : {}),
+  })
+  await waitFor(() => assert.ok(view.getByText('Current route')))
+  const panel = view.getByText('Current route').closest('.rounded-md')
+  assert.ok(panel.textContent.includes('unknown'), panel.textContent)
+  assert.ok(!panel.textContent.includes('Pricing not connected'), panel.textContent)
+  unmount()
 })
 
 // --- runner ----------------------------------------------------------------

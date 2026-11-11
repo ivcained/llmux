@@ -1,4 +1,4 @@
-"""Environment-backed runtime settings shared by the proxy and CLI."""
+"""Runtime settings with profile-scoped Hermes credential resolution."""
 
 from __future__ import annotations
 
@@ -6,38 +6,21 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 
-from pathlib import Path
-
 from .adapters import ANTSEED_DEFAULT_BASE_URL, SOLID_DEFAULT_BASE_URL, SURPLUS_DEFAULT_BASE_URL
 
 # Key names checked in order. Hermes stores a custom provider's key as
 # HERMES_CUSTOM_<NAME>_API_KEY, so a user who already added Solid as a Hermes
 # provider needs no second copy of the key.
 SOLID_KEY_NAMES = ("LLMUX_SOLID_API_KEY", "SOLID_API_KEY", "HERMES_CUSTOM_SOLID_API_KEY")
-HERMES_ENV_FILE = Path.home() / ".hermes" / ".env"
+SURPLUS_KEY_NAMES = ("LLMUX_SURPLUS_API_KEY", "SURPLUS_API_KEY")
 
 
-def _dotenv_value(names: tuple[str, ...], path: Path = HERMES_ENV_FILE) -> str | None:
-    """First matching value from Hermes's own .env, for keys the gateway did
-    not export into this process. Reads only the named keys; never logs them."""
+def _scoped_credentials() -> dict[str, str]:
+    """Hermes owns secret resolution. Missing/unbound scopes never use files."""
+    from agent.secret_scope import get_secret
 
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return None
-    found: dict[str, str] = {}
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, _, value = line.removeprefix("export ").partition("=")
-        name = name.strip()
-        if name in names:
-            found[name] = value.strip().strip('"').strip("'")
-    for name in names:
-        if found.get(name):
-            return found[name]
-    return None
+    return {name: value for name in (*SURPLUS_KEY_NAMES, *SOLID_KEY_NAMES)
+            if (value := get_secret(name))}
 
 
 def _first(values: Mapping[str, str], names: tuple[str, ...]) -> str | None:
@@ -62,7 +45,8 @@ class Settings:
     catalog_ttl_seconds: float = 60.0
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
-    track_usage: bool = True
+    track_usage: bool = False
+    allow_failover: bool = False
     solid_base_url: str = SOLID_DEFAULT_BASE_URL
     solid_api_key: str | None = None
 
@@ -71,6 +55,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """Parse LLMUX_* environment variables, rejecting invalid policy values."""
 
     values = os.environ if env is None else env
+    secrets = _scoped_credentials() if env is None else env
     raw_policy = (values.get("LLMUX_POLICY") or "balanced").strip().lower()
     policy = POLICY_ALIASES.get(raw_policy, raw_policy)
     if policy not in {"cheapest", "fastest", "balanced"}:
@@ -101,13 +86,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         balanced_tolerance=balanced_tolerance,
         allow_remote=values.get("LLMUX_ALLOW_REMOTE") == "1",
         surplus_base_url=(values.get("LLMUX_SURPLUS_BASE_URL") or SURPLUS_DEFAULT_BASE_URL).rstrip("/"),
-        surplus_api_key=values.get("LLMUX_SURPLUS_API_KEY") or values.get("SURPLUS_API_KEY"),
+        surplus_api_key=_first(secrets, SURPLUS_KEY_NAMES),
         antseed_base_url=(values.get("LLMUX_ANTSEED_BASE_URL") or ANTSEED_DEFAULT_BASE_URL).rstrip("/"),
         antseed_min_reputation=min_reputation,
         catalog_ttl_seconds=catalog_ttl,
         upstream_timeout_seconds=timeout,
-        track_usage=(values.get("LLMUX_TRACK_USAGE") or "1").strip() != "0",
+        track_usage=(values.get("LLMUX_TRACK_USAGE") or "0").strip() == "1",
+        allow_failover=(values.get("LLMUX_ALLOW_FAILOVER") or "0").strip() == "1",
         solid_base_url=(values.get("LLMUX_SOLID_BASE_URL") or SOLID_DEFAULT_BASE_URL).rstrip("/"),
-        solid_api_key=_first(values, SOLID_KEY_NAMES)
-        or (_dotenv_value(SOLID_KEY_NAMES) if env is None else None),
+        solid_api_key=_first(secrets, SOLID_KEY_NAMES),
     )

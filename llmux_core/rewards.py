@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PATH = Path.home() / ".hermes" / "llmux" / "rewards.json"
+from .paths import data_dir
 ENV_PATH = "LLMUX_REWARDS_JSON"
 
 
@@ -99,7 +99,7 @@ def load_table(path: Path | str | None = None) -> RewardTable:
     enhancement, never a reason to lose usage tracking.
     """
 
-    candidate = path or os.environ.get(ENV_PATH) or DEFAULT_PATH
+    candidate = path or os.environ.get(ENV_PATH) or (data_dir() / "rewards.json")
     try:
         return parse_policies(json.loads(Path(candidate).read_text()))
     except (OSError, ValueError):

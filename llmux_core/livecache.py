@@ -20,7 +20,7 @@ from typing import Any
 from .models import ModelRecord, Offer
 
 LOGGER = logging.getLogger("llmux.livecache")
-DEFAULT_SNAPSHOT = Path.home() / ".hermes" / "llmux" / "market-cache.json"
+from .paths import data_dir
 SNAPSHOT_VERSION = 1
 
 
@@ -63,7 +63,7 @@ class Snapshot:
     """Atomic JSON snapshot of public market data for a warm restart."""
 
     def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path or os.environ.get("LLMUX_MARKET_CACHE") or DEFAULT_SNAPSHOT)
+        self.path = Path(path or os.environ.get("LLMUX_MARKET_CACHE") or (data_dir() / "market-cache.json"))
         # Background refreshes save concurrently; serialize so writes never interleave.
         self._lock = threading.Lock()
 

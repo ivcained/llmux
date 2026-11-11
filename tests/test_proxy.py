@@ -361,7 +361,22 @@ class StreamingTests(ProxyCase):
         self.assertIn("[DONE]", body)
 
 
+class DefaultNoFailoverTests(ProxyCase):
+    surplus_mode = "fail"
+    surplus_cheap = True
+
+    def test_default_never_sends_a_second_potentially_billable_request(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.completions()
+        self.assertEqual(caught.exception.code, 503)
+        caught.exception.close()
+        self.assertEqual(len(self.surplus.requests), 1)
+        self.assertEqual(len(self.antseed.requests), 0)
+        self.assertFalse(self.proxy.plan_route({"model": "kimi-k3.1-pro"})["failover_allowed"])
+
+
 class FailoverTests(ProxyCase):
+    config = ProxyConfig(policy="cheapest", allow_failover=True)
     surplus_mode = "fail"
     surplus_cheap = True
 
@@ -895,6 +910,7 @@ class UsageTrackingStreamWithoutUsageTests(LedgerCase):
 
 
 class UsageTrackingFailureTests(LedgerCase):
+    config = ProxyConfig(policy="cheapest", allow_failover=True)
     surplus_mode = "fail"
     antseed_mode = "fail"
 

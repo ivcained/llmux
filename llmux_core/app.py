@@ -44,6 +44,7 @@ def build_proxy(settings: Settings) -> ProxyServer:
             catalog_ttl_seconds=settings.catalog_ttl_seconds,
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             allow_remote=settings.allow_remote,
+            allow_failover=settings.allow_failover,
         ),
         ledger=Ledger() if settings.track_usage else None,
         snapshot=Snapshot(),

@@ -1,19 +1,24 @@
 name: llmux
 title: LLMUX
 repo: https://github.com/ivcained/llmux
+# Release preparation: re-pin after the final tested code and README are pushed.
 sha: ff263e550a1ecc8a8c0b012b22e6043b091afaf1
-description: "Cross-marketplace LLM router: unions the Surplus Intelligence and Antseed inference markets behind one Hermes provider, routes each request by cheapest, fastest or balanced policy, and adds a composer card that shows the current route, named sellers with measured median TPS and time-to-first-token, comparable models in the same price tier, and a one-click mid-chat switch. Disclosure — registers one model provider at import (base URL http://127.0.0.1:8378/v1) and starts one detached local child process, `python -m llmux_core`, bound to 127.0.0.1 only; it is skipped when that port is already served or LLMUX_AUTOSTART=0, and its output is appended to ~/.hermes/logs/llmux-proxy.log. That child makes outbound HTTPS requests to https://api.surplusintelligence.ai and local HTTP requests to an optional Antseed buyer proxy at http://127.0.0.1:8377. The plugin writes no other files, holds no wallet or private key, performs no on-chain action, contains no self-updating code, and never patches Hermes or Desktop: the desktop half uses only the plugin SDK, and the dashboard half exposes read-only passthrough routes to the local proxy."
+description: "Compare Surplus Intelligence, Antseed and Solid offers in the Hermes composer, then route through one local provider by price, speed or balanced policy. Includes seller trust signals, explicit mid-chat switching, cached market data and a local usage ledger."
 maintainer: ivcained
 tier: community
 category: models
 requires_hermes: ">=0.22.5"
-version: "0.1.0"
+version: "0.1.1"
 docs_url: https://github.com/ivcained/llmux#readme
 readme: true
-platforms: []
+platforms: [linux, macos]
 known_issues:
-  - "Surplus inference needs a funded SURPLUS_API_KEY (inf_...) visible to the gateway process; the Antseed leg is optional and needs its local buyer proxy running with a funded payment channel."
-  - "Marketplace price and speed figures are upstream measurements (median, trailing 24h). They move with seller liquidity, so the card re-reads them rather than caching long."
+  - "Installed-Desktop mid-chat switching and a real paid reply/ledger row have not yet been verified. Automated card interactions use a simulated SDK host."
+  - "Inference is billable at the selected seller with no hard spending ceiling. Cross-source failover is off by default; LLMUX_ALLOW_FAILOVER=1 permits additional potentially billable attempts after upstream failures."
+  - "Marketplace keys resolve through agent.secret_scope.get_secret. Each proxy port is bound to one profile/configuration; mismatches fail closed. Antseed-only operation without any marketplace key is not supported. Solid prices are a dated manual table; speed and trust are unpublished."
+  - "Trusted view excludes explicit marketplace untrusted signals, but still includes sources with no published trust verdict. Lists are ranked shortlists, not every marketplace seller."
+  - "Starts a detached loopback proxy which can outlive Hermes. It reads configured marketplace credentials, sends inference context to the selected upstream and writes proxy logs, public market-cache snapshots and a local usage ledger. The ledger is off by default and enabled only with LLMUX_TRACK_USAGE=1."
+  - "Default upstreams are api.surplusintelligence.ai, accounts.solid.xyz and the optional Antseed buyer proxy at 127.0.0.1:8377. Base URLs are configurable."
 capabilities:
   provides_tools: []
   provides_hooks: []

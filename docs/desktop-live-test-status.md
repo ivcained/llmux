@@ -1,27 +1,25 @@
-# Desktop seller-switch test status
+# Desktop seller-switch verification
 
-## Verified
+## Current evidence
 
-- Published and installed revision: `b06f99e60e1e8978aea25601775a06ea2a508dfb`.
-- Python suite: 45 tests passed. This includes one runner executing 17 real React interaction scenarios with a simulated SDK.
-- Hermes plugin validation passed with zero warnings; runtime doctor passed.
-- Standalone FastAPI backend load and GET seller-options tested through TestClient. Fixed the former `import proxy_reader` failure.
-- Added read-only route validation endpoint. Invalid exact seller pins reject before inference.
-- Proxy health on port 8378 returns HTTP 200. No paid inference request was sent in this verification.
+Automated card interactions run the real React component against a simulated Hermes SDK host. Isolated browser captures additionally use the real Desktop UI primitives and styles with live read-only marketplace payloads. Neither establishes native Desktop switching.
+
+The final card suite passes 62 scenarios. It includes same-model cross-chat provider refresh, focus/owner/model binding, full seller-pin queries, a post-interrupt focus change, human approval accept/decline, queued/deferred outcomes and explicit-untrusted confirmation. Eleven rendered states at 1280x800 and 390x844 show no clipped Switch buttons or truncated speed placeholders; active trust tabs measure 5.19:1. The unsupported Bedrock case says pricing is not connected and preserves the direct chat. A scoped lintapple pass exits 0 with documented exclusions for real SDK controls, intentional truncation, segmented-button density and the scroll-mask contrast limitation; it is not a whole-app accessibility certification.
+
+## Separate installation identities
+
+The checkout, installed plugin at `$HERMES_HOME/plugins/llmux/desktop/plugin.js`, and Desktop runtime copy at `$HERMES_HOME/desktop-plugins/llmux/plugin.js` are separate. On 2026-11-11 the installed and runtime copies matched each other but did not match the latest checkout. A validation pass does not install the checkout. A Desktop plugin reload does not replace an already-imported Python backend module.
 
 ## Not verified
 
-The installed desktop has not loaded the repaired card and no live mid-chat switch or post-switch completion has been demonstrated. The installed Python plugin exists and is enabled, but the desktop copy at `$HERMES_HOME/desktop-plugins/llmux/plugin.js` was absent at the final check. Plugin validation and the React shim do not establish actual desktop execution.
+- Mid-chat seller switching through the installed Desktop UI, including the real shared confirmation and deferred apply timing.
+- A real reply after switching and its upstream route receipt.
+- Real usage/accounting after a proxy-routed reply.
 
-The GUI driver listed the running Hermes window but intermittently returned empty accessibility trees. A command-palette typing action landed `Reload desktop plugins` in the composer of the visible chat instead. No Enter/send action followed. Input automation was stopped to avoid interfering with the owner's active work. The draft may need that text removed by the owner.
+No paid inference was sent during this release verification. Do not change the active project chat to obtain proof. Use a separate test chat or isolated installation, preserve drafts, and obtain a bounded spend approval before any paid request.
 
-## Resume gate
+## Intended behavior and limits
 
-The owner should use Cmd+K > Reload desktop plugins, then enable LLMUX's desktop half in the plugin settings. Continue with a separate test chat, not an existing project conversation. Confirm the exact model and seller, display context-derived uncached input estimate, validate the route, verify the gateway's applied/deferred response, and observe the next response and selected upstream. Never call the simulated-host tests live proof.
+Switching validates a route, interrupts a busy turn if needed, rechecks the session binding, and applies the route for the next turn. It does not migrate or replay an interrupted response. A prior request can still be charged, and new context may lose cached-prefix discounts. Queued changes are not described as applied.
 
-## Remaining implementation limitations
-
-- The card stops the active turn and selects a route for the next turn. It does not migrate or automatically regenerate an interrupted response.
-- Surplus's current comparison row represents the marketplace, not a verified exact seller pin.
-- Speed fields are upstream medians; predicted completion time assumes 1000 output tokens and is not an observed mean response time.
-- The read-only proxy started for this test remains on 127.0.0.1:8378, without a Surplus credential supplied by this test.
+Direct-provider chats are not routed or counted by LLMUX. If an exact model has no recognized offer in connected sources, preserve its current provider and say that coverage is unavailable. Do not invent an alias or silently choose another model.

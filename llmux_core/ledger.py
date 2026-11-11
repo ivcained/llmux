@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-DEFAULT_DIR = Path.home() / ".hermes" / "llmux"
+from .paths import data_dir
 ENV_PATH = "LLMUX_LEDGER_PATH"
 MICRO = 1_000_000
 
@@ -175,7 +175,7 @@ class Ledger:
 
     def __init__(self, path: Path | str | None = None) -> None:
         if path is None:
-            path = os.environ.get(ENV_PATH) or (DEFAULT_DIR / "usage.jsonl")
+            path = os.environ.get(ENV_PATH) or (data_dir() / "usage.jsonl")
         self.path = Path(path)
         self._lock = threading.Lock()
         self._entries: list[dict[str, Any]] = []

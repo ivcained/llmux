@@ -128,15 +128,8 @@ class SolidKeyDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(settings.solid_api_key, "mine")
 
-    def test_dotenv_fallback_reads_only_named_keys(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env = Path(tmp) / ".env"
-            env.write_text('OTHER=x\nexport HERMES_CUSTOM_SOLID_API_KEY="from-file"\n')
-            self.assertEqual(
-                config_mod._dotenv_value(config_mod.SOLID_KEY_NAMES, env), "from-file"
-            )
-            self.assertIsNone(config_mod._dotenv_value(("NOPE",), env))
-            self.assertIsNone(config_mod._dotenv_value(("X",), Path(tmp) / "missing"))
+    def test_plugin_has_no_direct_dotenv_reader(self):
+        self.assertFalse(hasattr(config_mod, "_dotenv_value"))
 
 
 if __name__ == "__main__":

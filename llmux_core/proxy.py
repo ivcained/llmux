@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import hmac
 import json
 import logging
 import threading
@@ -129,6 +130,10 @@ class ProxyConfig:
     card_similar_limit: int = 6
     upstream_timeout_seconds: float = 300.0
     allow_remote: bool = False
+    # A failed paid request may still have been billed. Never retry elsewhere
+    # unless the operator explicitly enables cross-source failover.
+    allow_failover: bool = False
+    auth_token: str | None = None
     # Live cache: keep these models' seller detail refreshed in the background
     # so the card opens instantly. Models the user opens join automatically.
     warm_models: tuple[str, ...] = ()
@@ -482,7 +487,7 @@ class ProxyServer:
         return (
             decision,
             directive,
-            directive.source is None and directive.peer_id is None and directive.provider_id is None,
+            self.config.allow_failover and directive.source is None and directive.peer_id is None and directive.provider_id is None,
         )
 
     def _alternate(
@@ -1098,8 +1103,21 @@ class ProxyServer:
                     {"error": {"message": message, "type": "llmux_error", "code": code}},
                 )
 
+            def _authorized(self) -> bool:
+                expected = proxy.config.auth_token
+                if expected is None:  # Only explicit in-process test/embedding construction.
+                    return True
+                supplied = self.headers.get("Authorization", "")
+                if hmac.compare_digest(supplied.encode("utf-8"), f"Bearer {expected}".encode("utf-8")):
+                    return True
+                self.close_connection = True
+                self._error(401, "profile_auth_required", "LLMUX credentials do not match this proxy. Use the owning Hermes profile and port.")
+                return False
+
             def do_GET(self):
                 path = urlsplit(self.path).path
+                if path != "/health" and not self._authorized():
+                    return
                 try:
                     if path == "/health":
                         self._json(
@@ -1111,6 +1129,9 @@ class ProxyServer:
                                 "source_errors": proxy.source_errors,
                             },
                         )
+                        return
+                    if path == "/llmux/authcheck":
+                        self._json(200, {"ok": True, "service": "llmux", "auth": "profile-scoped-v1"})
                         return
                     if path == "/v1/models":
                         self._json(200, proxy._get_catalog().to_openai())
@@ -1179,6 +1200,8 @@ class ProxyServer:
                     self._error(502, "catalog_unavailable", str(exc))
 
             def do_POST(self):
+                if not self._authorized():
+                    return
                 path = urlsplit(self.path).path
                 if path != "/v1/chat/completions":
                     self._error(404, "not_found", "only /v1/chat/completions is routed")

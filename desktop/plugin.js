@@ -255,6 +255,21 @@ export function routedByLlmux(provider) {
   return !value || value === 'llmux' || value.endsWith(':llmux')
 }
 
+// Sources the LLMUX proxy actually connects to. A direct chat on any other
+// provider (Bedrock, OpenAI, ...) has no LLMUX pricing or routing at all, and
+// the card must say that instead of showing an ambiguous "unknown".
+const CONNECTED_SOURCES = new Set(['surplus', 'antseed', 'solid'])
+
+/** Provider id without any connection prefix (`custom:bedrock` -> `bedrock`). */
+function directSourceLabel(provider) {
+  return String(provider || '').split(':').pop().trim()
+}
+
+/** True when a source id names one of LLMUX's connected marketplaces. */
+export function connectedSource(source) {
+  return CONNECTED_SOURCES.has(String(source || '').trim().toLowerCase())
+}
+
 /**
  * Client-side "you are on a direct provider" panel, for gateway backends that
  * predate `direct` (the gateway mounts plugin routes once per run, so an old
@@ -288,6 +303,10 @@ async function fetchOptions(model) {
     throw new Error('LLMUX backend is not enabled. Enable it in Settings > Plugins > LLMUX.')
   }
   const provider = await focusedProvider()
+  // The FULL model string (with any @source/@provider:x pin) goes to
+  // /seller-options: the proxy resolves `current` from the directive, so a
+  // pinned chat sees its configured seller rather than an auto replan. Bare
+  // matching is only for display names and the comparable-models list.
   const query = new URLSearchParams({ model })
   if (provider && !routedByLlmux(provider)) query.set('provider', provider)
   const body = await restFn(`/seller-options?${query.toString()}`)
@@ -297,7 +316,7 @@ async function fetchOptions(model) {
   if (provider && !routedByLlmux(provider) && !current?.direct) {
     // Older backend ignored the provider and planned an LLMUX route; that would
     // name the wrong seller, so say what the chat is actually on.
-    current = directCurrent(model, provider, options, current)
+    current = directCurrent(bareModel(model), provider, options, current)
   }
   let similar = Array.isArray(body?.similar) ? body.similar : null
   let similarNote = null
@@ -306,7 +325,7 @@ async function fetchOptions(model) {
     // say plainly when the gateway has not mounted it yet instead of showing
     // an empty section that looks like "no comparable models exist".
     try {
-      const extra = await restFn(`/similar-models?model=${encodeURIComponent(model)}`)
+      const extra = await restFn(`/similar-models?model=${encodeURIComponent(bareModel(model))}`)
       similar = Array.isArray(extra?.data) ? extra.data : []
     } catch {
       similar = []
@@ -318,7 +337,7 @@ async function fetchOptions(model) {
   const freshness = body?.freshness && typeof body.freshness === 'object' ? body.freshness : null
   const allOptions = Array.isArray(body?.all_sellers) ? body.all_sellers : null
   const untrustedCount = finiteNumber(body?.untrusted_count)
-  return { options, allOptions, untrustedCount, similar, current, similarNote, savings, freshness }
+  return { options, allOptions, untrustedCount, similar, current, similarNote, savings, freshness, provider }
 }
 
 async function validateRoute(model) {
@@ -344,12 +363,14 @@ function modelRow(row) {
 }
 
 /** One big-number stat: value on top, small uppercase caption below. */
-function StatBlock({ value, label, accent = false }) {
+function StatBlock({ value, label, accent = false, compact = false }) {
   return jsxs('div', {
     className: 'min-w-0',
     children: [
       jsx('div', {
-        className: `truncate text-lg font-semibold tabular-nums leading-tight${accent ? ' text-(--ui-accent)' : ''}`,
+        className: compact
+          ? 'break-words text-xs font-medium leading-snug text-(--ui-text-secondary)'
+          : `truncate text-lg font-semibold tabular-nums leading-tight${accent ? ' text-(--ui-accent)' : ''}`,
         children: value,
       }),
       jsx('div', {
@@ -439,9 +460,14 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
     className: 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2.5',
     children: [
       jsxs('div', {
-        className: 'flex items-center gap-2',
+        className: 'flex flex-wrap items-center gap-2',
         children: [
-          jsx('span', { className: 'truncate text-sm font-medium', children: option.label || option.seller }),
+          // min-w-0 + flex-1 lets the name shrink and ellipsize; without it the
+          // flex item refuses to shrink below content size and the Switch
+          // button gets pushed off the row at narrow widths. flex-wrap moves
+          // the badges/actions onto a second line when even that is not enough
+          // (long name + trust badge + discount at 390px).
+          jsx('span', { className: 'min-w-0 flex-1 truncate text-sm font-medium', children: option.label || option.seller }),
           jsx(Badge, { variant: 'outline', children: option.source }),
           isCurrent ? jsx(Badge, { variant: 'outline', children: 'current' }) : null,
           trust
@@ -452,8 +478,8 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
                   title: option.trust_basis || undefined,
                   className:
                     trust === 'Untrusted'
-                      ? 'rounded border border-(--ui-text-warning,#d97706) px-1.5 text-[10px] font-medium text-(--ui-text-warning,#d97706)'
-                      : 'rounded border border-(--ui-stroke-secondary) px-1.5 text-[10px] font-medium text-(--ui-text-secondary)',
+                      ? 'shrink-0 rounded border border-(--ui-text-warning,#d97706) px-1.5 text-[10px] font-medium text-(--ui-text-warning,#d97706)'
+                      : 'shrink-0 rounded border border-(--ui-stroke-secondary) px-1.5 text-[10px] font-medium text-(--ui-text-secondary)',
                   children: trust === 'Untrusted' ? '\u26a0 Untrusted' : '\u2713 Trusted',
                 },
               )
@@ -483,8 +509,10 @@ function OfferRow({ option, contextTokens, onChoose, isCurrent = false, tags = [
         children: [
           jsx(StatBlock, { value: fmtPrice(option.input_per_m), label: 'in /M tok', accent: true }),
           jsx(StatBlock, { value: fmtPrice(option.output_per_m), label: 'out /M tok', accent: true }),
-          jsx(StatBlock, { value: tps, label: 'median tok/s' }),
-          jsx(StatBlock, { value: fmtMs(option.ttft_p50_ms, missingSpeed(option)), label: 'median first token' }),
+          // Long placeholders ("not published") render compact and wrap; a
+          // truncated "not pu…" tells the reader nothing.
+          jsx(StatBlock, { value: tps, label: 'median tok/s', compact: typeof option.tps_p50 !== 'number' }),
+          jsx(StatBlock, { value: fmtMs(option.ttft_p50_ms, missingSpeed(option)), label: 'median first token', compact: typeof option.ttft_p50_ms !== 'number' }),
         ],
       }),
       jsx('div', {
@@ -672,14 +700,21 @@ function CurrentPanel({ current, base, usage = null }) {
     })
   }
   const speed = currentSpeed(current, usage)
+  // A direct chat on a source LLMUX does not connect to has no marketplace
+  // price at all: say so, instead of the ambiguous "unknown" that a measured
+  // source with a missing reading gets.
+  const pricingConnected = !current.direct || connectedSource(current.source)
+  const priceText = value =>
+    typeof value === 'number' ? fmtPrice(value) : pricingConnected ? 'unknown' : 'Pricing not connected'
+  const speedMissing = missingSpeed(current)
   return jsxs('div', {
     className: 'rounded-md border border-(--ui-accent) px-3 py-2.5',
     children: [
       jsxs('div', {
-        className: 'flex items-center gap-2',
+        className: 'flex flex-wrap items-center gap-2',
         children: [
           jsx(SectionLabel, { children: 'Current route' }),
-          jsx('span', { className: 'truncate text-sm font-semibold', children: current.name || current.model }),
+          jsx('span', { className: 'min-w-0 flex-1 truncate text-sm font-semibold', children: current.name || current.model }),
           jsx(Badge, { variant: 'outline', children: current.source }),
           current.direct
             ? jsx(Badge, { variant: 'outline', children: 'direct' })
@@ -695,15 +730,25 @@ function CurrentPanel({ current, base, usage = null }) {
       jsxs('div', {
         className: 'mt-2 grid grid-cols-4 gap-2',
         children: [
-          jsx(StatBlock, { value: fmtPrice(current.input_per_m), label: 'in /M tok', accent: true }),
-          jsx(StatBlock, { value: fmtPrice(current.output_per_m), label: 'out /M tok', accent: true }),
-          jsx(StatBlock, { value: speed.tps.value, label: speed.tps.label }),
-          jsx(StatBlock, { value: speed.timing.value, label: speed.timing.label }),
+          jsx(StatBlock, {
+            value: priceText(current.input_per_m),
+            label: 'in /M tok',
+            accent: typeof current.input_per_m === 'number',
+            compact: typeof current.input_per_m !== 'number',
+          }),
+          jsx(StatBlock, {
+            value: priceText(current.output_per_m),
+            label: 'out /M tok',
+            accent: typeof current.output_per_m === 'number',
+            compact: typeof current.output_per_m !== 'number',
+          }),
+          jsx(StatBlock, { value: speed.tps.value, label: speed.tps.label, compact: speed.tps.value === speedMissing }),
+          jsx(StatBlock, { value: speed.timing.value, label: speed.timing.label, compact: speed.timing.value === speedMissing }),
         ],
       }),
       jsx('div', {
         className: 'mt-2 text-[11px] text-(--ui-text-secondary)',
-        children: `${current.model} \u00b7 ${current.reason}`,
+        children: `${current.model} · ${current.reason}`,
       }),
     ],
   })
@@ -711,6 +756,9 @@ function CurrentPanel({ current, base, usage = null }) {
 
 function SwitchDialog({ onClose }) {
   const model = useValue(host.state.model)
+  const sessionId = useValue(host.state.focusedSessionId)
+  const owner = useValue(host.state.focusedSessionOwner)
+  const profile = useValue(host.state.focusedSessionProfile)
   const usage = useValue(host.state.focusedUsage)
   const base = bareModel(model)
   const contextTokens = typeof usage?.context_used === 'number' && usage.context_used > 0 ? usage.context_used : null
@@ -720,8 +768,8 @@ function SwitchDialog({ onClose }) {
   const [trustView, setTrustView] = useState('trusted')
 
   const query = useQuery({
-    queryKey: ['llmux', 'seller-options', base],
-    queryFn: () => fetchOptions(base),
+    queryKey: ['llmux', 'seller-options', sessionId, ownerKey(owner, profile), model],
+    queryFn: () => fetchOptions(model),
     enabled: Boolean(base),
     // Live pricing: marketplace prices and speeds move with seller liquidity.
     refetchInterval: LIVE_REFRESH_MS,
@@ -749,6 +797,14 @@ function SwitchDialog({ onClose }) {
   const savings = data.savings || null
   const liveText = freshnessText(data.freshness)
   const loadError = query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null
+  // A chat on a direct provider LLMUX has no connector for (Bedrock, OpenAI, ...)
+  // gets honest wording: LLMUX's sources simply have no offers for the model,
+  // which is not the same claim as "nobody sells it".
+  const directProvider = typeof data.provider === 'string' && data.provider ? data.provider : null
+  const unsupportedDirect =
+    directProvider && !routedByLlmux(directProvider) && !connectedSource(directSourceLabel(directProvider))
+      ? directSourceLabel(directProvider)
+      : null
 
   function notifyPinned(option) {
     const name = option.label || option.seller
@@ -781,6 +837,9 @@ function SwitchDialog({ onClose }) {
     }
     if (sessionBusy(binding.sessionId)) {
       await host.request('session.interrupt', { session_id: binding.sessionId })
+    }
+    if (!bindingCurrent(binding)) {
+      throw new Error('The focused chat or model changed while the turn was stopping. No model change was applied; reopen the seller card in the intended chat.')
     }
     const params = {
       key: 'model',
@@ -845,8 +904,8 @@ function SwitchDialog({ onClose }) {
           jsx(DialogTitle, { children: 'Switch model or seller mid-chat' }),
           jsx(DialogDescription, {
             children: current
-              ? `Current: ${current.name || current.model} via ${current.seller}. Switching re-sends the whole chat on the new route and drops the cached-prefix discount, so confirm before you pin.`
-              : `Current: ${base || 'the selected model'}. Switching re-sends the whole chat on the new route and drops the cached-prefix discount, so confirm before you pin.`,
+              ? `Current: ${current.name || current.model} via ${current.seller}. The next request sends the current context to the new route and may lose cached-prefix discounts. Confirm before you pin.`
+              : `Current: ${base || 'the selected model'}. The next request sends the current context to the new route and may lose cached-prefix discounts. Confirm before you pin.`,
           }),
         ],
       }),
@@ -871,11 +930,16 @@ function SwitchDialog({ onClose }) {
                       onClick: () => setTrustView(entry.id),
                       className:
                         trustView === entry.id
-                          ? 'rounded px-2.5 py-1 text-[11px] font-medium bg-(--ui-accent) text-(--ui-accent-foreground,white)'
+                          ? 'rounded px-2.5 py-1 text-[11px] font-medium bg-(--ui-accent)'
                           : 'rounded px-2.5 py-1 text-[11px] text-(--ui-text-secondary)',
+                      // --ui-accent-foreground does not exist in the desktop
+                      // stylesheet; its white fallback failed contrast on the
+                      // accent fill. The theme's midground foreground is the
+                      // accessible ink paired with exactly this background.
+                      style: trustView === entry.id ? { color: 'var(--dt-midground-foreground)' } : undefined,
                       children:
                         entry.id === 'all' && untrustedCount > 0
-                          ? `${entry.label} (+${untrustedCount} untrusted)`
+                          ? `${entry.label} (${untrustedCount} flagged market-wide)`
                           : entry.label,
                     },
                     `trust:${entry.id}`,
@@ -886,8 +950,8 @@ function SwitchDialog({ onClose }) {
                 className: 'text-[10px] text-(--ui-text-secondary)',
                 children:
                   trustView === 'all'
-                    ? 'Showing every seller with its marketplace trust label.'
-                    : 'Hiding sellers their marketplace flags as untrusted.',
+                    ? `Showing up to ${MAX_OPTIONS} ranked offers, including flagged sellers. Trust labels appear only where published.`
+                    : 'Marketplace-flagged sellers are hidden. Sources without a published trust rating are still included.',
               }),
             ],
           })
@@ -961,12 +1025,21 @@ function SwitchDialog({ onClose }) {
                 className: 'py-6 text-sm text-(--ui-text-secondary)',
                 'data-testid': 'llmux-empty',
                 children:
-                  data?.freshness?.updated_at
-                    ? 'No sellers for this model on any source right now. Prices were refreshed recently.'
-                    : 'No measured offers for this model yet. Live pricing is still loading; reopen this card in a moment.',
+                  unsupportedDirect
+                    ? `No matching offers in LLMUX's connected sources. Your ${unsupportedDirect.charAt(0).toUpperCase() + unsupportedDirect.slice(1)} chat continues directly. Choose an LLMUX-supported model to compare sellers.`
+                    : trustView === 'trusted' && untrustedCount > 0
+                      ? 'No sellers in the trusted view. All sellers includes marketplace-flagged routes; review their warnings before switching.'
+                      : data?.freshness?.updated_at
+                        ? 'No sellers for this model on any source right now. Prices were refreshed recently.'
+                        : 'No measured offers for this model yet. Live pricing is still loading; reopen this card in a moment.',
               })
             : jsxs('div', {
-                className: 'flex max-h-[50vh] flex-col gap-3 overflow-y-auto',
+                // scroll-fade-y is the desktop stylesheet's edge-aware fade:
+                // clipped content fades at the list's top/bottom edge, so a
+                // scrollable list reads as scrollable. The inline maxHeight
+                // keeps the cap even where the arbitrary class is uncompiled.
+                className: 'flex max-h-[50vh] scroll-fade-y flex-col gap-3 overflow-y-auto',
+                style: { maxHeight: '50vh' },
                 children: [
                   jsxs('div', {
                     className: 'flex flex-col gap-2',
@@ -1026,10 +1099,10 @@ function SwitchDialog({ onClose }) {
         title: `Switch to ${selected?.option?.label || selected?.option?.seller || 'this route'}?`,
         description:
           selected?.option?.trusted === false
-            ? `${selected.option.trust_basis || 'This seller is flagged untrusted by its marketplace'}. Its replies may be unreliable or its terms unverified. This validates the route, stops any in-flight turn, and re-sends the entire conversation to this seller. Cached-prefix discounts are lost. Nothing replays automatically.`
+            ? `${selected.option.trust_basis || 'This seller is flagged untrusted by its marketplace'}. Its replies may be unreliable or its terms unverified. Confirming validates the route, stops any in-flight turn and requests the switch. The stopped request may still be charged. The next request sends the current context to this seller and may lose cached-prefix discounts; input is billed at the new route price. Nothing replays automatically.`
             : selected?.option?.kind === 'model'
-            ? 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new model. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.'
-            : 'This validates the route, stops any in-flight turn, and re-sends the entire conversation on the new seller. Cached-prefix discounts are lost and input is billed again at the new route price. Nothing replays automatically after the switch.',
+            ? 'Confirming validates the route, stops any in-flight turn and requests the model switch. The stopped request may still be charged. The next request sends the current context to the new model and may lose cached-prefix discounts; input is billed at the new route price. Nothing replays automatically after the switch.'
+            : 'Confirming validates the route, stops any in-flight turn and requests the seller switch. The stopped request may still be charged. The next request sends the current context to the new seller and may lose cached-prefix discounts; input is billed at the new route price. Nothing replays automatically after the switch.',
         confirmLabel: selected?.option?.kind === 'model' ? 'Switch model' : 'Switch seller',
         busyLabel: 'Switching…',
         cancelLabel: 'Keep current route',

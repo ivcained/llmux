@@ -21,6 +21,11 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+from llmux_core.credentials import local_headers, verify_proxy_identity
+
 router = APIRouter()
 _PLUGIN_DIR = Path(__file__).resolve().parents[1]
 
@@ -55,11 +60,13 @@ def routes() -> list[str]:
 def _read(path: str) -> dict:
     ensure_proxy()
     try:
-        with urllib.request.urlopen(proxy_base() + path, timeout=35) as response:
+        verify_proxy_identity(proxy_port())
+        request = urllib.request.Request(proxy_base() + path, headers=local_headers())
+        with urllib.request.urlopen(request, timeout=35) as response:
             result = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         raise HTTPException(status_code=exc.code, detail="LLMUX rejected the requested model or seller.") from exc
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=503,
             detail=(

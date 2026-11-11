@@ -41,11 +41,17 @@ def ensure_proxy() -> None:
 
 
 def seller_options_for(model: str, *, base_url: str | None = None) -> list[dict[str, Any]]:
-    base_url = base_url or f"http://127.0.0.1:{proxy_port()}"
+    expected_base = f"http://127.0.0.1:{proxy_port()}"
+    if base_url is not None and base_url.rstrip("/") != expected_base:
+        raise ValueError("LLMUX private data can only be read from its configured loopback proxy")
+    base_url = expected_base
     url = f"{base_url}/llmux/seller-options?model={quote(model)}"
     ensure_proxy()
     try:
-        with urllib.request.urlopen(url, timeout=35) as response:
+        from llmux_core.credentials import local_headers, verify_proxy_identity
+        verify_proxy_identity(proxy_port())
+        request = urllib.request.Request(url, headers=local_headers())
+        with urllib.request.urlopen(request, timeout=35) as response:
             body = json.loads(response.read())
         if isinstance(body, dict) and isinstance(body.get("data"), list):
             return body["data"]

@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from .app import build_proxy
 from .config import load_settings
+from .credentials import proxy_token
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
             tps_floor=args.tps_floor or settings.tps_floor,
         )
     proxy = build_proxy(settings)
+    # The CLI/daemon never exposes a spend-capable unauthenticated listener.
+    proxy.config = replace(proxy.config, auth_token=proxy_token(settings))
     port = proxy.start(settings.host, settings.port)
     # Keep the market cache live so the card never waits on the marketplaces.
     proxy.start_warming()
