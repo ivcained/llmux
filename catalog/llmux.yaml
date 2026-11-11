@@ -1,8 +1,8 @@
 name: llmux
 title: LLMUX
 repo: https://github.com/ivcained/llmux
-# Release preparation: re-pin after the final tested code and README are pushed.
-sha: ff263e550a1ecc8a8c0b012b22e6043b091afaf1
+# Verified 0.1.1 release; later metadata-only pin commits do not change this tree.
+sha: 356118cf7f06dd08352636b2b3cc3795f4cc6e4e
 description: "Compare Surplus Intelligence, Antseed and Solid offers in the Hermes composer, then route through one local provider by price, speed or balanced policy. Includes seller trust signals, explicit mid-chat switching, cached market data and a local usage ledger."
 maintainer: ivcained
 tier: community
